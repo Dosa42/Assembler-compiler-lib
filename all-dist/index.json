@@ -296,6 +296,29 @@
         }
       ],
       "stored_at": "2026-11-12T08:30:35.940181+00:00"
+    },
+    "wasm-tools": {
+      "component": "wasm-tools",
+      "platform": "ubuntu-24.04-arm64",
+      "artifact_id": 13925618032,
+      "artifact_created_at": "2026-11-12T08:03:21Z",
+      "artifact_digest": "sha256:29dfddb77baec5375cf2ef583d2f5927430caafb17d446c31d571d9ffc26c8d8",
+      "run_id": 43179370823,
+      "run_url": "https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43179370823",
+      "source_commit": "24ea2a565e23022343bb4ed7de2a75d4341064b6",
+      "archive": {
+        "name": "wasm-tools-ubuntu-24.04-arm64.tar.xz",
+        "size": 5062304,
+        "sha256": "d03fa355a35954b99e6ab42c9b12c41a1ce6540a11209cc97392800b23de962d"
+      },
+      "files": [
+        {
+          "name": "wasm-tools-ubuntu-24.04-arm64.tar.xz",
+          "size": 5062304,
+          "sha256": "d03fa355a35954b99e6ab42c9b12c41a1ce6540a11209cc97392800b23de962d"
+        }
+      ],
+      "stored_at": "2026-11-12T08:30:42.059761+00:00"
     }
   }
 }

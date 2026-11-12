@@ -15,6 +15,7 @@ Source-built installation archives committed to this repository. Each archive co
 | [newlib](ubuntu-24.04-arm64/newlib/README.md) | ubuntu-24.04-arm64 | [43163341859](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43163341859) | [newlib-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/newlib/newlib-ubuntu-24.04-arm64.tar.xz) |
 | [rustup](ubuntu-24.04-arm64/rustup/README.md) | ubuntu-24.04-arm64 | [43179370823](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43179370823) | [rustup-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/rustup/rustup-ubuntu-24.04-arm64.tar.xz) |
 | [wabt](ubuntu-24.04-arm64/wabt/README.md) | ubuntu-24.04-arm64 | [43179370823](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43179370823) | [wabt-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/wabt/wabt-ubuntu-24.04-arm64.tar.xz) |
+| [wasm-tools](ubuntu-24.04-arm64/wasm-tools/README.md) | ubuntu-24.04-arm64 | [43179370823](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43179370823) | [wasm-tools-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/wasm-tools/wasm-tools-ubuntu-24.04-arm64.tar.xz) |
 | [zig](ubuntu-24.04-arm64/zig/README.md) | ubuntu-24.04-arm64 | [43168282553](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43168282553) | [zig-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/zig/zig-ubuntu-24.04-arm64.tar.xz) |
 
 ## Download and restore
