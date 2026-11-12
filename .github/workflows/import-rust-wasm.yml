@@ -1,0 +1,171 @@
+name: Import Rust and WebAssembly source repositories
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/import-rust-wasm.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: import-rust-wasm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  import:
+    name: Import Rust, rustup and WebAssembly sources
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out destination metadata
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.ref_name }}
+          sparse-checkout: |
+            /sources/upstreams.json
+          sparse-checkout-cone-mode: false
+
+      - name: Fetch sources, expand pinned submodules and verify Git trees
+        run: |
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import urllib.parse
+          
+          root = Path(os.environ['GITHUB_WORKSPACE'])
+          scratch = Path(os.environ['RUNNER_TEMP']) / 'rust-wasm-import'
+          scratch.mkdir(parents=True, exist_ok=True)
+          manifest_path = root / 'sources/upstreams.json'
+          manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+          repositories = [
+              ('rust', 'https://github.com/rust-lang/rust.git', ['Rust compiler', 'Cargo', 'Clippy', 'rustfmt', 'Rust standard library']),
+              ('rustup', 'https://github.com/rust-lang/rustup.git', ['rustup']),
+              ('wasm-tools', 'https://github.com/bytecodealliance/wasm-tools.git', ['WebAssembly tools']),
+              ('wabt', 'https://github.com/WebAssembly/wabt.git', ['WebAssembly Binary Toolkit']),
+              ('binaryen', 'https://github.com/WebAssembly/binaryen.git', ['Binaryen', 'wasm-opt']),
+              ('wasi-sdk', 'https://github.com/WebAssembly/wasi-sdk.git', ['WASI SDK', 'wasi-libc', 'WASI Clang']),
+              ('emscripten', 'https://github.com/emscripten-core/emscripten.git', ['Emscripten']),
+              ('emsdk', 'https://github.com/emscripten-core/emsdk.git', ['Emscripten SDK manager']),
+          ]
+          cache = {}
+          active = set()
+          sequence = 0
+          
+          def git(*arguments, env=None, input=None, capture=True):
+              result = subprocess.run(['git', *arguments], cwd=root, env=env, input=input, stdout=subprocess.PIPE if capture else None, check=True)
+              return result.stdout
+          
+          def entries(tree):
+              result = {}
+              for entry in git('ls-tree', '-r', '-z', tree).split(b'\0'):
+                  if not entry:
+                      continue
+                  metadata, path = entry.split(b'\t', 1)
+                  mode, kind, oid = metadata.decode().split()
+                  result[path.decode('utf-8')] = (mode, kind, oid)
+              return result
+          
+          def expand(url, commit):
+              global sequence
+              identity = (url, commit)
+              if identity in cache:
+                  return cache[identity]
+              if identity in active:
+                  raise RuntimeError('Recursive submodule dependency: ' + url)
+              active.add(identity)
+              present = subprocess.run(['git', 'cat-file', '-e', commit + '^{commit}'], cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+              if not present:
+                  print('Fetching ' + url + ' at ' + commit, flush=True)
+                  git('fetch', '--no-tags', '--depth=1', url, commit, capture=False)
+              original = git('rev-parse', commit + '^{tree}').decode().strip()
+              original_entries = entries(original)
+              links = {path: data for path, data in original_entries.items() if data[0] == '160000'}
+              submodules = []
+              expanded = original
+              if links:
+                  config = git('config', '--blob=' + commit + ':.gitmodules', '--null', '--get-regexp', r'^submodule\..*\.path$')
+                  urls = {}
+                  for item in config.split(b'\0'):
+                      if not item:
+                          continue
+                      key, path = item.decode().split('\n', 1)
+                      value = git('config', '--blob=' + commit + ':.gitmodules', '--get', key[:-5] + '.url').decode().strip()
+                      urls[path] = urllib.parse.urljoin(url.rstrip('/') + '/', value) if value.startswith('.') else value
+                  sequence += 1
+                  index = scratch / ('index-' + str(sequence))
+                  env = dict(os.environ, GIT_INDEX_FILE=str(index))
+                  git('read-tree', original, env=env)
+                  for path, data in links.items():
+                      if path not in urls:
+                          raise RuntimeError('Missing submodule URL: ' + url + ':' + path)
+                      child = expand(urls[path], data[2])
+                      git('update-index', '--force-remove', '--', path, env=env)
+                      git('read-tree', '--prefix=' + path + '/', child['tree'], env=env)
+                      submodules.append({'path': path, 'url': urls[path], 'commit': data[2], 'upstream_tree': child['upstream_tree'], 'tree': child['tree'], 'file_count': child['file_count']})
+                      for nested in child['submodules']:
+                          submodules.append(dict(nested, path=path + '/' + nested['path']))
+                  expanded = git('write-tree', env=env).decode().strip()
+                  index.unlink()
+              expanded_entries = entries(expanded)
+              if any(data[0] == '160000' for data in expanded_entries.values()):
+                  raise RuntimeError('Unexpanded submodules remain: ' + url)
+              for path, data in original_entries.items():
+                  if data[0] != '160000' and expanded_entries.get(path) != data:
+                      raise RuntimeError('Upstream file changed during import: ' + url + ':' + path)
+              for module in submodules:
+                  imported = git('rev-parse', expanded + ':' + module['path']).decode().strip()
+                  if imported != module['tree']:
+                      raise RuntimeError('Submodule tree mismatch: ' + module['path'])
+              record = {'upstream_tree': original, 'tree': expanded, 'file_count': len(expanded_entries), 'submodules': submodules}
+              active.remove(identity)
+              cache[identity] = record
+              print('Verified ' + url + ': ' + str(record['file_count']) + ' files, ' + str(len(submodules)) + ' expanded submodules', flush=True)
+              return record
+          
+          git('config', 'user.name', 'github-actions[bot]')
+          git('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
+          git('config', 'gc.auto', '0')
+          for name, url, components in repositories:
+              relative = 'sources/' + name
+              existing = next((item for item in manifest['repositories'] if item['path'] == relative), None)
+              if existing is not None:
+                  recorded_tree = git('rev-parse', 'HEAD:' + relative).decode().strip()
+                  if recorded_tree != existing['tree']:
+                      raise RuntimeError('Existing imported tree differs from its manifest: ' + relative)
+                  print(relative + ' is already imported at ' + existing['commit'], flush=True)
+                  continue
+              conflict = subprocess.run(['git', 'cat-file', '-e', 'HEAD:' + relative], cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+              if conflict:
+                  raise RuntimeError('Unrecorded source directory exists: ' + relative)
+              refs = git('ls-remote', '--symref', url, 'HEAD').decode().splitlines()
+              branch = next(line.split()[1].removeprefix('refs/heads/') for line in refs if line.startswith('ref:'))
+              commit = next(line.split()[0] for line in refs if not line.startswith('ref:') and line.endswith('\tHEAD'))
+              source = expand(url, commit)
+              git('read-tree', '--prefix=' + relative + '/', source['tree'])
+              staged = git('write-tree').decode().strip()
+              if git('rev-parse', staged + ':' + relative).decode().strip() != source['tree']:
+                  raise RuntimeError('Destination tree verification failed: ' + relative)
+              for previous in manifest['repositories']:
+                  original_tree = git('rev-parse', 'HEAD:' + previous['path']).decode().strip()
+                  current_tree = git('rev-parse', staged + ':' + previous['path']).decode().strip()
+                  if current_tree != original_tree:
+                      raise RuntimeError('Existing source tree changed: ' + previous['path'])
+              record = dict(source, path=relative, url=url, branch=branch, commit=commit, components=components, imported_at=datetime.datetime.now(datetime.timezone.utc).isoformat(), verification='All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively')
+              manifest['repositories'].append(record)
+              manifest['updated_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+              manifest_path.write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+              git('add', '--force', '--', 'sources/upstreams.json')
+              git('commit', '--quiet', '-m', 'Import official ' + name + ' source and pinned submodule sources', capture=False)
+              git('-c', 'pack.threads=2', '-c', 'pack.windowMemory=128m', 'push', 'origin', 'HEAD:refs/heads/' + os.environ['GITHUB_REF_NAME'], capture=False)
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+                  summary.write('- ' + relative + ': ' + commit + ', ' + str(source['file_count']) + ' verified files, ' + str(len(source['submodules'])) + ' expanded submodules\n')
+          PY
