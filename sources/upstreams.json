@@ -414,7 +414,62 @@
       ],
       "imported_at": "2026-11-12T07:33:49.977818+00:00",
       "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
+    },
+    {
+      "fetch_url": "https://github.com/WebAssembly/wasi-sdk.git",
+      "upstream_tree": "5ac01451edf049a04f2e889b35b399900f6e74dd",
+      "tree": "d1ba226064803279a162eae4ec2909ee565946b7",
+      "file_count": 186342,
+      "submodules": [
+        {
+          "path": "src/config",
+          "url": "https://git.savannah.gnu.org/git/config.git",
+          "commit": "f992bcc08219edb283d2ab31dd3871a4a0e8220e",
+          "fetch_url": "https://github.com/chipp/gnu-config.git",
+          "upstream_tree": "f4a45d5c318ae7b61841de8df0163cbc8c7e6d00",
+          "tree": "f4a45d5c318ae7b61841de8df0163cbc8c7e6d00",
+          "file_count": 15
+        },
+        {
+          "path": "src/llvm-project",
+          "url": "https://github.com/llvm/llvm-project",
+          "commit": "392dfff97d29b59d77e5cac6d4b6ef2585fe7117",
+          "fetch_url": "https://github.com/llvm/llvm-project",
+          "upstream_tree": "2750be17d274751a9b7446d283f79782f35e69fb",
+          "tree": "2750be17d274751a9b7446d283f79782f35e69fb",
+          "file_count": 180650
+        },
+        {
+          "path": "src/wasi-libc",
+          "url": "https://github.com/WebAssembly/wasi-libc",
+          "commit": "9ce251499208b193de389d0a2ff6b74f90fd1ad9",
+          "fetch_url": "https://github.com/WebAssembly/wasi-libc",
+          "upstream_tree": "c7da27865b0913b22d8c4a486c717add50f5b3aa",
+          "tree": "24915fc02d01b4915641df24463ca9b60195fa6b",
+          "file_count": 5589
+        },
+        {
+          "path": "src/wasi-libc/tools/wasi-headers/WASI",
+          "url": "https://github.com/WebAssembly/WASI",
+          "commit": "59cbe140561db52fc505555e859de884e0ee7f00",
+          "fetch_url": "https://github.com/WebAssembly/WASI",
+          "upstream_tree": "0226c54d6ae939698723f02f0eb5dc9f19147a02",
+          "tree": "0226c54d6ae939698723f02f0eb5dc9f19147a02",
+          "file_count": 63
+        }
+      ],
+      "path": "sources/wasi-sdk",
+      "url": "https://github.com/WebAssembly/wasi-sdk.git",
+      "branch": "main",
+      "commit": "0f85552f2cc7b52d1fdb6ca7b05a1c0e80abe6de",
+      "components": [
+        "WASI SDK",
+        "wasi-libc",
+        "WASI Clang"
+      ],
+      "imported_at": "2026-11-12T07:39:02.576047+00:00",
+      "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
     }
   ],
-  "updated_at": "2026-11-12T07:33:49.977833+00:00"
+  "updated_at": "2026-11-12T07:39:02.576075+00:00"
 }
