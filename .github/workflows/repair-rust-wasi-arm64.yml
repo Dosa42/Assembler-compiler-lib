@@ -1,0 +1,82 @@
+name: Repair Rust and WASI ARM64 outputs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/repair-rust-wasi-arm64.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  recover-rust:
+    name: Recover and verify saved Rust compiler
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: Check out repair scripts and source provenance
+        uses: actions/checkout@v7.0.1
+        with:
+          sparse-checkout: |
+            /.github/scripts/
+            /all-dist/restore.py
+            /sources/upstreams.json
+            /sources/rust/LICENSE-APACHE
+            /sources/rust/LICENSE-MIT
+          sparse-checkout-cone-mode: false
+
+      - name: Install verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang patchelf
+
+      - name: Recover saved source-built compiler and add LLD
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/recover-rust-stage.py
+
+      - name: Verify native Rust, Cargo, WebAssembly and package
+        env:
+          COMPONENT: rust
+          RECOVER_STAGE: '1'
+        run: python3 .github/scripts/build-rust-wasm.py
+
+      - name: Upload verified Rust distribution
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: rust-ubuntu-24.04-arm64
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload recovery logs
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: rust-recovery-logs
+          path: build-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  publish-rust:
+    needs: recover-rust
+    uses: ./.github/workflows/publish-all-dist.yml
+    with:
+      component: rust
+      run_id: ${{ format('{0}', github.run_id) }}
+
+  retry-wasi:
+    uses: ./.github/workflows/build-rust-wasm-arm64.yml
+    with:
+      component: wasi-sdk
+
+  publish-wasi:
+    needs: retry-wasi
+    uses: ./.github/workflows/publish-all-dist.yml
+    with:
+      component: wasi-sdk
+      run_id: ${{ format('{0}', github.run_id) }}
