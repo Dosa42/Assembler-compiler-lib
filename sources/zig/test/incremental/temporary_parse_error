@@ -1,0 +1,25 @@
+#zig build-exe {
+--name test
+-Mroot=test.zig
+#}
+
+#write test.zig {
+const std = @import("std");
+pub fn main() !void {}
+#}
+#update
+#check stdout
+
+#write test.zig {
+pub fn main() !void {
+#}
+#update "introduce parse error"
+#check errors {
+test.zig:2:1: error: expected statement, found 'EOF'
+#}
+
+#write test.zig {
+pub fn main() !void {}
+#}
+#update "fix parse error"
+#check stdout

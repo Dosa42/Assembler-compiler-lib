@@ -1,0 +1,8 @@
+#zig build-exe {
+--name basic
+-Mroot=basic.zig
+#}
+
+#write basic.zig @basic.zig
+#update
+#check lldb @lldb

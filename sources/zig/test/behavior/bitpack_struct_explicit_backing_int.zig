@@ -1,0 +1,50 @@
+const std = @import("std");
+const builtin = @import("builtin");
+const assert = std.debug.assert;
+const expectEqual = std.testing.expectEqual;
+const native_endian = builtin.cpu.arch.endian();
+
+test "bitpack struct explicit backing integer" {
+    if (builtin.cpu.arch.isSpirv() and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+
+    const S1 = bitpack struct { a: u8, b: u8, c: u8 };
+
+    const S2 = bitpack struct(i24) { d: u8, e: u8, f: u8 };
+
+    const S3 = bitpack struct { x: S1, y: S2 };
+    const S3Padded = bitpack struct(u64) { s3: S3, pad: u16 };
+
+    try expectEqual(48, @bitSizeOf(S3));
+    try expectEqual(@sizeOf(u48), @sizeOf(S3));
+
+    try expectEqual(3, @offsetOf(S3, "y"));
+    try expectEqual(24, @bitOffsetOf(S3, "y"));
+
+    if (native_endian == .little) {
+        const s3 = @as(S3Padded, @bitCast(@as(u64, 0xe952d5c71ff4))).s3;
+        try expectEqual(@as(u8, 0xf4), s3.x.a);
+        try expectEqual(@as(u8, 0x1f), s3.x.b);
+        try expectEqual(@as(u8, 0xc7), s3.x.c);
+        try expectEqual(@as(u8, 0xd5), s3.y.d);
+        try expectEqual(@as(u8, 0x52), s3.y.e);
+        try expectEqual(@as(u8, 0xe9), s3.y.f);
+    }
+
+    const S4 = bitpack struct { a: i32, b: i8 };
+    const S5 = bitpack struct(u80) { a: i32, b: i8, c: S4 };
+    const S6 = bitpack struct(i80) { a: i32, b: S4, c: i8 };
+
+    const expectedBitSize = 80;
+    const expectedByteSize = @sizeOf(u80);
+    try expectEqual(expectedBitSize, @bitSizeOf(S5));
+    try expectEqual(expectedByteSize, @sizeOf(S5));
+    try expectEqual(expectedBitSize, @bitSizeOf(S6));
+    try expectEqual(expectedByteSize, @sizeOf(S6));
+
+    try expectEqual(5, @offsetOf(S5, "c"));
+    try expectEqual(40, @bitOffsetOf(S5, "c"));
+    try expectEqual(9, @offsetOf(S6, "c"));
+    try expectEqual(72, @bitOffsetOf(S6, "c"));
+}

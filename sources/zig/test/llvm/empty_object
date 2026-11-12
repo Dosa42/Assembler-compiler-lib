@@ -1,0 +1,77 @@
+#skip arc-freestanding-none-baseline-whole-llvm-debug-lld
+#skip arc-linux-gnu-baseline-whole-llvm-debug-lld
+#skip arc-linux-none-baseline-whole-llvm-debug-lld
+
+#skip arm-uefi-sf-baseline-whole-llvm-debug-lld
+
+#skip csky-freestanding-f32-baseline-whole-llvm-debug-lld
+#skip csky-freestanding-none-baseline-whole-llvm-debug-lld
+#skip csky-freestanding-sf-baseline-whole-llvm-debug-lld
+#skip csky-linux-f32-baseline-whole-llvm-debug-lld
+#skip csky-linux-gnu-baseline-whole-llvm-debug-lld
+#skip csky-linux-gnusf-baseline-whole-llvm-debug-lld
+#skip csky-linux-none-baseline-whole-llvm-debug-lld
+#skip csky-linux-sf-baseline-whole-llvm-debug-lld
+
+#skip loongarch32-freestanding-f32-baseline-whole-llvm-debug-lld
+#skip loongarch32-linux-f32-baseline-whole-llvm-debug-lld
+#skip loongarch32-uefi-none-baseline-whole-llvm-debug-lld
+
+#skip loongarch64-freestanding-f32-baseline-whole-llvm-debug-lld
+#skip loongarch64-linux-f32-baseline-whole-llvm-debug-lld
+#skip loongarch64-linux-muslf32-baseline-whole-llvm-debug-lld
+#skip loongarch64-uefi-none-baseline-whole-llvm-debug-lld
+
+#skip mipsel-psx-sf-baseline-whole-llvm-debug-lld
+
+#skip mipsf32-freestanding-none-baseline-whole-llvm-debug-lld
+#skip mipsf32-linux-gnu-baseline-whole-llvm-debug-lld
+#skip mipsf32-linux-musl-baseline-whole-llvm-debug-lld
+#skip mipsf32-linux-none-baseline-whole-llvm-debug-lld
+#skip mipsf32-netbsd-none-baseline-whole-llvm-debug-lld
+#skip mipsf32-rtems-none-baseline-whole-llvm-debug-lld
+
+#skip mipsf32el-freestanding-none-baseline-whole-llvm-debug-lld
+#skip mipsf32el-linux-gnu-baseline-whole-llvm-debug-lld
+#skip mipsf32el-linux-musl-baseline-whole-llvm-debug-lld
+#skip mipsf32el-linux-none-baseline-whole-llvm-debug-lld
+#skip mipsf32el-netbsd-none-baseline-whole-llvm-debug-lld
+#skip mipsf32el-rtems-none-baseline-whole-llvm-debug-lld
+
+#skip nvptx-cuda-none-baseline-whole-llvm-debug-lld
+#skip nvptx-nvcl-none-baseline-whole-llvm-debug-lld
+
+#skip nvptx64-cuda-none-baseline-whole-llvm-debug-lld
+#skip nvptx64-nvcl-none-baseline-whole-llvm-debug-lld
+
+#skip riscv32-uefi-sf-baseline-whole-llvm-debug-lld
+
+#skip riscv32be-freestanding-f32-baseline-whole-llvm-debug-lld
+#skip riscv32be-freestanding-none-baseline-whole-llvm-debug-lld
+#skip riscv32be-freestanding-sf-baseline-whole-llvm-debug-lld
+
+#skip riscv64-uefi-sf-baseline-whole-llvm-debug-lld
+
+#skip riscv64be-freestanding-f32-baseline-whole-llvm-debug-lld
+#skip riscv64be-freestanding-none-baseline-whole-llvm-debug-lld
+#skip riscv64be-freestanding-sf-baseline-whole-llvm-debug-lld
+
+#skip spirv32-opencl-none-baseline-whole-llvm-debug-lld
+#skip spirv32-opengl-none-baseline-whole-llvm-debug-lld
+#skip spirv32-vulkan-none-baseline-whole-llvm-debug-lld
+
+#skip spirv64-amdhsa-none-baseline-whole-llvm-debug-lld
+#skip spirv64-opencl-none-baseline-whole-llvm-debug-lld
+#skip spirv64-vulkan-none-baseline-whole-llvm-debug-lld
+
+#skip xcore-freestanding-none-baseline-whole-llvm-debug-lld
+
+#zig build-obj {
+--name test
+-Mroot=test.zig
+-fno-emit-asm -femit-bin
+#}
+
+#write test.zig
+#update
+#check errors

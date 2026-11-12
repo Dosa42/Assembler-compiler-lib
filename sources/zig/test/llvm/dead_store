@@ -1,0 +1,72 @@
+#skip amdgcn-amdhsa-none-baseline-whole-llvm-debug-lld
+
+#skip csky-freestanding-f32-baseline-whole-llvm-debug-lld
+#skip csky-freestanding-none-baseline-whole-llvm-debug-lld
+#skip csky-freestanding-sf-baseline-whole-llvm-debug-lld
+#skip csky-linux-f32-baseline-whole-llvm-debug-lld
+#skip csky-linux-gnu-baseline-whole-llvm-debug-lld
+#skip csky-linux-gnusf-baseline-whole-llvm-debug-lld
+#skip csky-linux-none-baseline-whole-llvm-debug-lld
+#skip csky-linux-sf-baseline-whole-llvm-debug-lld
+
+#skip nvptx-cuda-none-baseline-whole-llvm-debug-lld
+#skip nvptx-nvcl-none-baseline-whole-llvm-debug-lld
+
+#skip nvptx64-cuda-none-baseline-whole-llvm-debug-lld
+#skip nvptx64-nvcl-none-baseline-whole-llvm-debug-lld
+
+#skip spirv32-opencl-none-baseline-whole-llvm-debug-lld
+#skip spirv32-opengl-none-baseline-whole-llvm-debug-lld
+#skip spirv32-vulkan-none-baseline-whole-llvm-debug-lld
+
+#skip spirv64-amdhsa-none-baseline-whole-llvm-debug-lld
+#skip spirv64-opencl-none-baseline-whole-llvm-debug-lld
+#skip spirv64-vulkan-none-baseline-whole-llvm-debug-lld
+
+#zig build-obj {
+--name test -ofmt=llvmir -fno-lld -fno-new-linker
+-Mroot=test.zig
+#}
+
+#write test.zig {
+export fn entry(ptr: *volatile i16) void {
+    ptr.* = 123;
+    ptr.* = 321;
+}
+#}
+#update "volatile"
+#check llvm {
+...
+define ... @test.entry(ptr ... %ptr) ... {
+  ...
+  store volatile i16 123, ptr %ptr, align ?, !...
+  store volatile i16 321, ptr %ptr, align ?, !...
+  ...
+}
+
+...
+#}
+
+#write test.zig {
+export fn entry(ptr: *volatile i16) void {
+    entry2(ptr[0..1]);
+}
+fn entry2(slice: []volatile i16) void {
+    @setRuntimeSafety(false);
+    slice[0] = 123;
+    slice[0] = 321;
+}
+#}
+#update "volatile slice"
+#check llvm {
+...
+define ... @test.entry2(..., ptr ... %slice.ptr, isize ... %slice.len) ... {
+  ...
+  store volatile i16 123, ptr %slice.ptr.0, align ?, !...
+  ...
+  store volatile i16 321, ptr %slice.ptr.1, align ?, !...
+  ...
+}
+
+...
+#}

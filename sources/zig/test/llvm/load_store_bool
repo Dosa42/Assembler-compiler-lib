@@ -1,0 +1,52 @@
+#skip amdgcn-amdhsa-none-baseline-whole-llvm-debug-lld
+
+#skip bpfeb-freestanding-none-baseline-whole-llvm-debug-lld
+
+#skip bpfel-freestanding-none-baseline-whole-llvm-debug-lld
+
+#skip csky-freestanding-f32-baseline-whole-llvm-debug-lld
+#skip csky-freestanding-none-baseline-whole-llvm-debug-lld
+#skip csky-freestanding-sf-baseline-whole-llvm-debug-lld
+#skip csky-linux-f32-baseline-whole-llvm-debug-lld
+#skip csky-linux-gnu-baseline-whole-llvm-debug-lld
+#skip csky-linux-gnusf-baseline-whole-llvm-debug-lld
+#skip csky-linux-none-baseline-whole-llvm-debug-lld
+#skip csky-linux-sf-baseline-whole-llvm-debug-lld
+
+#skip nvptx-cuda-none-baseline-whole-llvm-debug-lld
+#skip nvptx-nvcl-none-baseline-whole-llvm-debug-lld
+
+#skip nvptx64-cuda-none-baseline-whole-llvm-debug-lld
+#skip nvptx64-nvcl-none-baseline-whole-llvm-debug-lld
+
+#zig build-obj {
+--name test -ofmt=llvmir -fno-lld -fno-new-linker
+-Mroot=test.zig
+#}
+
+#write test.zig {
+export fn foo(a: *bool, b: *align(2) bool) void {
+    const tmp = a.*;
+    a.* = b.*;
+    b.* = tmp;
+}
+#}
+#update
+#check llvm {
+...
+define ... void @test.foo(ptr ... %a, ptr ... %b) ... {
+  ...
+  %a.load = load i8, ptr %a, align 1, !...
+  %a.trunc = trunc nuw i8 %a.load to i1, !...
+  ...
+  %b.load = load i8, ptr %b, align 2, !...
+  %b.trunc = trunc nuw i8 %b.load to i1, !...
+  %b.ext = zext i1 %b.trunc to i8, !...
+  store i8 %b.ext, ptr %a, align 1, !...
+  %a.zext = zext i1 %a.trunc to i8, !...
+  store i8 %a.zext, ptr %b, align 2, !...
+  ret void, !...
+}
+
+...
+#}

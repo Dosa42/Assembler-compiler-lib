@@ -37,6 +37,44 @@
       "components": [
         "Glibc"
       ]
+    },
+    {
+      "path": "sources/llvm-project",
+      "url": "https://github.com/llvm/llvm-project.git",
+      "branch": "main",
+      "commit": "7edee473113855f3e806a86e5e644f61b40c5ba3",
+      "tree": "a0d5e5e4857dfb6d8604d1d50f35d3cb56c206ea",
+      "file_count": 190680,
+      "components": [
+        "LLVM",
+        "Clang",
+        "LLD",
+        "LLDB",
+        "MLIR",
+        "Flang",
+        "Compiler-RT",
+        "libc",
+        "libc++",
+        "libc++abi",
+        "libunwind",
+        "OpenMP"
+      ],
+      "imported_at": "2026-11-12T06:10:15.645970+00:00",
+      "verification": "Imported Git tree SHA matches upstream Git tree SHA"
+    },
+    {
+      "path": "sources/zig",
+      "url": "https://codeberg.org/ziglang/zig.git",
+      "branch": "master",
+      "commit": "b0b99d777f6597723fb6bc725038f280d1c751f4",
+      "tree": "b355b3bc8400251672b948340a8448f9372e78c6",
+      "file_count": 21733,
+      "components": [
+        "Zig"
+      ],
+      "imported_at": "2026-11-12T06:10:34.014673+00:00",
+      "verification": "Imported Git tree SHA matches upstream Git tree SHA"
     }
-  ]
+  ],
+  "updated_at": "2026-11-12T06:10:34.019244+00:00"
 }

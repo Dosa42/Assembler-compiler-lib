@@ -1,0 +1,8 @@
+#zig build-exe {
+--name mal
+-Mroot=main.zig
+#}
+
+#write main.zig @main.zig
+#update
+#check lldb @lldb

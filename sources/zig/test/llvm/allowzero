@@ -1,0 +1,117 @@
+#skip amdgcn-amdhsa-none-baseline-whole-llvm-debug-lld
+
+#skip bpfeb-freestanding-none-baseline-whole-llvm-debug-lld
+
+#skip bpfel-freestanding-none-baseline-whole-llvm-debug-lld
+
+#skip csky-freestanding-f32-baseline-whole-llvm-debug-lld
+#skip csky-freestanding-none-baseline-whole-llvm-debug-lld
+#skip csky-freestanding-sf-baseline-whole-llvm-debug-lld
+#skip csky-linux-f32-baseline-whole-llvm-debug-lld
+#skip csky-linux-gnu-baseline-whole-llvm-debug-lld
+#skip csky-linux-gnusf-baseline-whole-llvm-debug-lld
+#skip csky-linux-none-baseline-whole-llvm-debug-lld
+#skip csky-linux-sf-baseline-whole-llvm-debug-lld
+
+#skip nvptx-cuda-none-baseline-whole-llvm-debug-lld
+#skip nvptx-nvcl-none-baseline-whole-llvm-debug-lld
+
+#skip nvptx64-cuda-none-baseline-whole-llvm-debug-lld
+#skip nvptx64-nvcl-none-baseline-whole-llvm-debug-lld
+
+#skip spirv32-opencl-none-baseline-whole-llvm-debug-lld
+#skip spirv32-opengl-none-baseline-whole-llvm-debug-lld
+#skip spirv32-vulkan-none-baseline-whole-llvm-debug-lld
+
+#skip spirv64-amdhsa-none-baseline-whole-llvm-debug-lld
+#skip spirv64-opencl-none-baseline-whole-llvm-debug-lld
+#skip spirv64-vulkan-none-baseline-whole-llvm-debug-lld
+
+#zig build-obj {
+--name test -ofmt=llvmir -fno-lld -fno-new-linker
+-Mroot=test.zig
+#}
+
+#write test.zig {
+export fn entry(ptr: *allowzero i16) i16 {
+    return ptr.*;
+}
+#}
+#update "load"
+#check llvm {
+...
+define ... @test.entry(ptr ... %ptr) ... #attrs ... {
+  ...
+  %ptr.load = load i16, ptr %ptr, align ?, !...
+  ...
+}
+
+...
+attributes #attrs = { ... null_pointer_is_valid ... }
+...
+#}
+
+#write test.zig {
+export fn entry(ptr: *allowzero i16) void {
+    ptr.* = 42;
+}
+#}
+#update "store"
+#check llvm {
+...
+define ... @test.entry(ptr ... %ptr) ... #attrs ... {
+  ...
+  store i16 42, ptr %ptr, align ?, !...
+  ...
+}
+
+...
+attributes #attrs = { ... null_pointer_is_valid ... }
+...
+#}
+
+#write test.zig {
+export fn entry(ptr: *allowzero i16) i16 {
+    return entry2(ptr[0..1]);
+}
+fn entry2(slice: []allowzero i16) i16 {
+    @setRuntimeSafety(false);
+    return slice[0];
+}
+#}
+#update "slice load"
+#check llvm {
+...
+define ... @test.entry2(..., ptr ... %slice.ptr, isize ... %slice.len) ... #attrs ... {
+  ...
+  %slice.load = load i16, ptr %slice.ptr.0, align ?, !...
+  ...
+}
+
+...
+attributes #attrs = { ... null_pointer_is_valid ... }
+...
+#}
+
+#write test.zig {
+export fn entry(ptr: *allowzero i16) void {
+    entry2(ptr[0..1]);
+}
+fn entry2(slice: []allowzero i16) void {
+    @setRuntimeSafety(false);
+    slice[0] = 42;
+}
+#}
+#update "slice store"
+#check llvm {
+...
+define ... @test.entry2(..., ptr ... %slice.ptr, isize ... %slice.len) ... #attrs ... {
+  ...
+  store i16 42, ptr %slice.ptr.0, align ?, !...
+  ...
+}
+
+...
+attributes #attrs = { ... null_pointer_is_valid ... }
+...
+#}

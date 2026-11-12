@@ -1,0 +1,119 @@
+#skip amdgcn-amdhsa-none-baseline-whole-llvm-debug-lld
+
+#skip csky-freestanding-f32-baseline-whole-llvm-debug-lld
+#skip csky-freestanding-none-baseline-whole-llvm-debug-lld
+#skip csky-freestanding-sf-baseline-whole-llvm-debug-lld
+#skip csky-linux-f32-baseline-whole-llvm-debug-lld
+#skip csky-linux-gnu-baseline-whole-llvm-debug-lld
+#skip csky-linux-gnusf-baseline-whole-llvm-debug-lld
+#skip csky-linux-none-baseline-whole-llvm-debug-lld
+#skip csky-linux-sf-baseline-whole-llvm-debug-lld
+
+#skip nvptx-cuda-none-baseline-whole-llvm-debug-lld
+#skip nvptx-nvcl-none-baseline-whole-llvm-debug-lld
+
+#skip nvptx64-cuda-none-baseline-whole-llvm-debug-lld
+#skip nvptx64-nvcl-none-baseline-whole-llvm-debug-lld
+
+#skip spirv32-opencl-none-baseline-whole-llvm-debug-lld
+#skip spirv32-opengl-none-baseline-whole-llvm-debug-lld
+#skip spirv32-vulkan-none-baseline-whole-llvm-debug-lld
+
+#skip spirv64-amdhsa-none-baseline-whole-llvm-debug-lld
+#skip spirv64-opencl-none-baseline-whole-llvm-debug-lld
+#skip spirv64-vulkan-none-baseline-whole-llvm-debug-lld
+
+#zig build-obj {
+--name test -ofmt=llvmir -fno-lld -fno-new-linker
+-Mroot=test.zig
+#}
+
+#write test.zig {
+export fn entry(ptr: *i16) void {
+    _ = @atomicLoad(i16, ptr, .acquire);
+}
+#}
+#update "atomic acquire"
+#check llvm {
+...
+define ... @test.entry(ptr ... %ptr) ... {
+  ...
+  %ptr.load = load atomic i16, ptr %ptr ... acquire, align ?, !...
+  ...
+}
+
+...
+#}
+
+#write test.zig {
+export fn entry(ptr: *volatile i16) void {
+    _ = @atomicLoad(i16, ptr, .unordered);
+}
+#}
+#update "atomic volatile unordered"
+#check llvm {
+...
+define ... @test.entry(ptr ... %ptr) ... {
+  ...
+  %ptr.load = load atomic volatile i16, ptr %ptr ... unordered, align ?, !...
+  ...
+}
+
+...
+#}
+
+#write test.zig {
+export fn entry(ptr: *volatile i16) void {
+    _ = ptr.*;
+}
+#}
+#update "volatile"
+#check llvm {
+...
+define ... @test.entry(ptr ... %ptr) ... {
+  ...
+  %ptr.load = load volatile i16, ptr %ptr, align ?, !...
+  ...
+}
+
+...
+#}
+
+#write test.zig {
+export fn entry(ptr: *volatile i16) void {
+    entry2(ptr[0..1]);
+}
+fn entry2(slice: []volatile i16) void {
+    @setRuntimeSafety(false);
+    _ = slice[0];
+}
+#}
+#update "volatile slice"
+#check llvm {
+...
+define ... @test.entry2(..., ptr ... %slice.ptr, isize ... %slice.len) ... {
+  ...
+  %slice.load = load volatile i16, ptr %slice.ptr.0, align ?, !...
+  ...
+}
+
+...
+#}
+
+#write test.zig {
+const S = bitpack struct(u16) { a: u2, b: u8, c: u6 };
+export fn entry(ptr: *volatile S) void {
+    _ = ptr.b;
+}
+#}
+#update "volatile packed"
+#check llvm {
+...
+define ... @test.entry(ptr ... %ptr) ... {
+  ...
+  %ptr.load = load volatile i16, ptr %ptr.0, align ?, !...
+  ...
+}
+
+...
+#}

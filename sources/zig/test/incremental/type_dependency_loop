@@ -1,0 +1,64 @@
+#zig build-exe {
+--name test
+-Mroot=test.zig
+#}
+
+#write test.zig {
+pub const A = struct { b: B };
+pub const B = struct { a: A };
+pub fn main() void {
+    _ = @as(B, undefined);
+}
+#}
+#update
+#check errors {
+error: dependency loop with length 2
+    test.zig:2:27: note: type 'test.B' depends on type 'test.A' for field declared here
+    test.zig:1:27: note: type 'test.A' depends on type 'test.B' for field declared here
+    note: eliminate any one of these dependencies to break the loop
+#}
+
+#write test.zig {
+pub const A = struct { b: B };
+pub const B = struct { a: A };
+pub fn main() void {
+    _ = B;
+}
+#}
+#update "remove reference to dependency loop"
+#check stdout
+
+#write test.zig {
+pub const A = struct { b: B };
+pub const B = struct { a: *align(@alignOf(A)) A };
+pub fn main() void {
+    _ = B;
+}
+#}
+#update "change dependency loop without fixing it"
+#check stdout
+
+#write test.zig {
+pub const A = struct { b: B };
+pub const B = struct { a: *align(@alignOf(A)) A };
+pub fn main() void {
+    _ = @as(B, undefined);
+}
+#}
+#update "reference dependency loop again"
+#check errors {
+error: dependency loop with length 2
+    test.zig:2:43: note: type 'test.B' depends on type 'test.A' for alignment query here
+    test.zig:1:27: note: type 'test.A' depends on type 'test.B' for field declared here
+    note: eliminate any one of these dependencies to break the loop
+#}
+
+#write test.zig {
+pub const A = struct { b: B };
+pub const B = struct { a: *A };
+pub fn main() void {
+    _ = @as(B, undefined);
+}
+#}
+#update "fix dependency loop"
+#check stdout

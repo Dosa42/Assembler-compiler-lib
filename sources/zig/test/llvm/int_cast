@@ -1,0 +1,129 @@
+#skip amdgcn-amdhsa-none-baseline-whole-llvm-debug-lld
+
+#skip csky-freestanding-f32-baseline-whole-llvm-debug-lld
+#skip csky-freestanding-none-baseline-whole-llvm-debug-lld
+#skip csky-freestanding-sf-baseline-whole-llvm-debug-lld
+#skip csky-linux-f32-baseline-whole-llvm-debug-lld
+#skip csky-linux-gnu-baseline-whole-llvm-debug-lld
+#skip csky-linux-gnusf-baseline-whole-llvm-debug-lld
+#skip csky-linux-none-baseline-whole-llvm-debug-lld
+#skip csky-linux-sf-baseline-whole-llvm-debug-lld
+
+#skip nvptx-cuda-none-baseline-whole-llvm-debug-lld
+#skip nvptx-nvcl-none-baseline-whole-llvm-debug-lld
+
+#skip nvptx64-cuda-none-baseline-whole-llvm-debug-lld
+#skip nvptx64-nvcl-none-baseline-whole-llvm-debug-lld
+
+#zig build-obj {
+--name test -fno-lld -fno-new-linker -ofmt=llvmir
+-Mroot=test.zig
+#}
+
+#write test.zig {
+export fn entry(x: i32) u8 {
+    @setRuntimeSafety(false);
+    return @intCast(x);
+}
+#}
+#update "narrow signed to unsigned"
+#check llvm {
+...
+define ... @test.entry(i32 ... %x) ... {
+  ...
+  %cast.x = trunc nuw i32 %x to i8, !...
+  ...
+}
+
+...
+#}
+
+#write test.zig {
+export fn entry(x: u16) i8 {
+    @setRuntimeSafety(false);
+    return @intCast(x);
+}
+#}
+#update "narrow unsigned to signed"
+#check llvm {
+...
+define ... @test.entry(i16 ... %x) ... {
+  ...
+  %cast.x = trunc nuw nsw i16 %x to i8, !...
+  ...
+}
+
+...
+#}
+
+#write test.zig {
+export fn entry(x: i32) i16 {
+    @setRuntimeSafety(false);
+    return @intCast(x);
+}
+#}
+#update "narrow signed to signed"
+#check llvm {
+...
+define ... @test.entry(i32 ... %x) ... {
+  ...
+  %cast.x = trunc nsw i32 %x to i16, !...
+  ...
+}
+
+...
+#}
+
+#write test.zig {
+export fn entry(x: u64) u16 {
+    @setRuntimeSafety(false);
+    return @intCast(x);
+}
+#}
+#update "narrow unsigned to unsigned"
+#check llvm {
+...
+define ... @test.entry(... %x) ... {
+  ...
+  %cast.x = trunc nuw i64 %x.0 to i16, !...
+  ...
+}
+
+...
+#}
+
+#write test.zig {
+export fn entry(x: i8) u16 {
+    @setRuntimeSafety(false);
+    return @intCast(x);
+}
+#}
+#update "widen signed to unsigned"
+#check llvm {
+...
+define ... @test.entry(i8 ... %x) ... {
+  ...
+  %cast.x = sext i8 %x to i16, !...
+  ...
+}
+
+...
+#}
+
+#write test.zig {
+export fn entry(x: u8) i32 {
+    @setRuntimeSafety(false);
+    return @intCast(x);
+}
+#}
+#update "widen unsigned to signed"
+#check llvm {
+...
+define ... @test.entry(i8 ... %x) ... {
+  ...
+  %cast.x = zext i8 %x to i32, !...
+  ...
+}
+
+...
+#}
