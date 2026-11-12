@@ -1,0 +1,66 @@
+name: Publish built outputs to all-dist
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-all-dist.yml
+      - .github/scripts/publish-dist.py
+      - all-dist/restore.py
+  workflow_run:
+    workflows:
+      - Build GNU ARM64 executables
+      - Build LLVM and Zig ARM64 executables
+      - Rebuild selected GNU components
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Component to publish, or all
+        type: string
+        default: all
+      run_id:
+        description: Optional build run ID
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      component:
+        type: string
+        default: all
+        required: false
+      run_id:
+        type: string
+        default: ''
+        required: false
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-all-dist-main
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Save verified executables and libraries in the repository
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: Check out distribution files and publisher
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+          sparse-checkout: |
+            .github/scripts
+            all-dist
+
+      - name: Download verified build artifacts and commit all-dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DESTINATION_BRANCH: main
+          REQUESTED_COMPONENT: ${{ inputs.component || 'all' }}
+          SOURCE_RUN_ID: ${{ inputs.run_id || '' }}
+        run: python3 .github/scripts/publish-dist.py
