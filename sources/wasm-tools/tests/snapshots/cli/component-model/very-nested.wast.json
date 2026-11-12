@@ -1,0 +1,89 @@
+{
+  "source_filename": "tests/cli/component-model/very-nested.wast",
+  "commands": [
+    {
+      "type": "assert_invalid",
+      "line": 4,
+      "filename": "very-nested.0.wasm",
+      "module_type": "binary",
+      "text": "conflicts with previous name"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 1570,
+      "filename": "very-nested.1.wasm",
+      "module_type": "binary",
+      "text": "effective type size exceeds the limit"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 1691,
+      "filename": "very-nested.2.wasm",
+      "module_type": "binary",
+      "text": "effective type size exceeds the limit"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 1781,
+      "filename": "very-nested.3.wasm",
+      "module_type": "binary",
+      "text": "effective type size exceeds the limit"
+    },
+    {
+      "type": "assert_malformed",
+      "line": 1871,
+      "filename": "very-nested.4.wat",
+      "module_type": "text",
+      "text": "nesting too deep"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 1958,
+      "filename": "very-nested.5.wasm",
+      "module_type": "binary",
+      "text": "type nesting is too deep"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 2065,
+      "filename": "very-nested.6.wasm",
+      "module_type": "binary",
+      "text": "type nesting is too deep"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 2172,
+      "filename": "very-nested.7.wasm",
+      "module_type": "binary",
+      "text": "type nesting is too deep"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 2278,
+      "filename": "very-nested.8.wasm",
+      "module_type": "binary",
+      "text": "type nesting is too deep"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 2384,
+      "filename": "very-nested.9.wasm",
+      "module_type": "binary",
+      "text": "type nesting is too deep"
+    },
+    {
+      "type": "module",
+      "line": 2522,
+      "name": "c",
+      "filename": "very-nested.10.wasm",
+      "module_type": "binary"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 2545,
+      "filename": "very-nested.11.wasm",
+      "module_type": "binary",
+      "text": "effective type size exceeds the limit"
+    }
+  ]
+}

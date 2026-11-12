@@ -1,0 +1,315 @@
+{
+  "source_filename": "tests/cli/stack-switching/validation.wast",
+  "commands": [
+    {
+      "type": "module",
+      "line": 9,
+      "filename": "validation.0.wasm",
+      "module_type": "binary"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 42,
+      "filename": "validation.1.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 68,
+      "filename": "validation.2.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 94,
+      "filename": "validation.3.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 120,
+      "filename": "validation.4.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 149,
+      "filename": "validation.5.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "module",
+      "line": 181,
+      "filename": "validation.6.wasm",
+      "module_type": "binary"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 226,
+      "filename": "validation.7.wasm",
+      "module_type": "binary",
+      "text": "non-continuation type"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 247,
+      "filename": "validation.8.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 268,
+      "filename": "validation.9.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 296,
+      "filename": "validation.10.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 324,
+      "filename": "validation.11.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 344,
+      "filename": "validation.12.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 366,
+      "filename": "validation.13.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "module",
+      "line": 389,
+      "filename": "validation.14.wasm",
+      "module_type": "binary"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 418,
+      "filename": "validation.15.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 434,
+      "filename": "validation.16.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 455,
+      "filename": "validation.17.wasm",
+      "module_type": "binary",
+      "text": "non-continuation type 0"
+    },
+    {
+      "type": "module",
+      "line": 474,
+      "filename": "validation.18.wasm",
+      "module_type": "binary"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 559,
+      "filename": "validation.19.wasm",
+      "module_type": "binary",
+      "text": "unknown tag"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 578,
+      "filename": "validation.20.wasm",
+      "module_type": "binary",
+      "text": "non-continuation type"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 592,
+      "filename": "validation.21.wasm",
+      "module_type": "binary",
+      "text": "non-continuation type"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 610,
+      "filename": "validation.22.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 626,
+      "filename": "validation.23.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 642,
+      "filename": "validation.24.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 660,
+      "filename": "validation.25.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 681,
+      "filename": "validation.26.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 702,
+      "filename": "validation.27.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 723,
+      "filename": "validation.28.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "module",
+      "line": 750,
+      "filename": "validation.29.wasm",
+      "module_type": "binary"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 762,
+      "filename": "validation.30.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 777,
+      "filename": "validation.31.wasm",
+      "module_type": "binary",
+      "text": "type mismatch"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 792,
+      "filename": "validation.32.wasm",
+      "module_type": "binary",
+      "text": "unknown tag"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 805,
+      "filename": "validation.33.wasm",
+      "module_type": "binary",
+      "text": "invalid cast"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 811,
+      "filename": "validation.34.wasm",
+      "module_type": "binary",
+      "text": "invalid cast"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 817,
+      "filename": "validation.35.wasm",
+      "module_type": "binary",
+      "text": "invalid cast"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 826,
+      "filename": "validation.36.wasm",
+      "module_type": "binary",
+      "text": "invalid cast"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 832,
+      "filename": "validation.37.wasm",
+      "module_type": "binary",
+      "text": "invalid cast"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 838,
+      "filename": "validation.38.wasm",
+      "module_type": "binary",
+      "text": "invalid cast"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 847,
+      "filename": "validation.39.wasm",
+      "module_type": "binary",
+      "text": "invalid cast"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 856,
+      "filename": "validation.40.wasm",
+      "module_type": "binary",
+      "text": "invalid cast"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 865,
+      "filename": "validation.41.wasm",
+      "module_type": "binary",
+      "text": "invalid cast"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 877,
+      "filename": "validation.42.wasm",
+      "module_type": "binary",
+      "text": "invalid cast"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 886,
+      "filename": "validation.43.wasm",
+      "module_type": "binary",
+      "text": "invalid cast"
+    },
+    {
+      "type": "assert_invalid",
+      "line": 895,
+      "filename": "validation.44.wasm",
+      "module_type": "binary",
+      "text": "invalid cast"
+    }
+  ]
+}

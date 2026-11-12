@@ -253,7 +253,39 @@
       ],
       "imported_at": "2026-11-12T07:32:50.324987+00:00",
       "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
+    },
+    {
+      "upstream_tree": "003073a90059bc75b0ff02d9a816151fbee08ecd",
+      "tree": "205786c7dcd144feeda41c15e6f362b78056451a",
+      "file_count": 10902,
+      "submodules": [
+        {
+          "path": "tests/component-model",
+          "url": "https://github.com/webassembly/component-model",
+          "commit": "1a743de691c5966a217efcf58fef9cd68dacc754",
+          "upstream_tree": "bb826104e20eadf7a05015b986cd62180c5aee7f",
+          "tree": "bb826104e20eadf7a05015b986cd62180c5aee7f",
+          "file_count": 102
+        },
+        {
+          "path": "tests/testsuite",
+          "url": "https://github.com/WebAssembly/testsuite",
+          "commit": "44f1503f98409fa3737437bf9449a37a5def4210",
+          "upstream_tree": "2d16170bcf95df43883a3a6f780ffd80749e432d",
+          "tree": "2d16170bcf95df43883a3a6f780ffd80749e432d",
+          "file_count": 301
+        }
+      ],
+      "path": "sources/wasm-tools",
+      "url": "https://github.com/bytecodealliance/wasm-tools.git",
+      "branch": "main",
+      "commit": "3738acc554512a656a326bfb5519d05e4be6d917",
+      "components": [
+        "WebAssembly tools"
+      ],
+      "imported_at": "2026-11-12T07:33:04.154180+00:00",
+      "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
     }
   ],
-  "updated_at": "2026-11-12T07:32:50.325004+00:00"
+  "updated_at": "2026-11-12T07:33:04.154196+00:00"
 }

@@ -1,0 +1,27 @@
+package foo:foo;
+
+interface bar {
+  foo: async func(s: string) -> string;
+}
+
+interface streams {
+  foo: async func(x: future<future<u32>>, y: u32) -> stream<string>;
+}
+
+interface exp {
+  resource a {
+    constructor();
+    name: async func(other: borrow<a>) -> string;
+  }
+}
+
+world module {
+  import bar;
+  import foo: async func(s: string) -> string;
+  import streams;
+
+  export bar;
+  export foo: async func(s: string) -> string;
+  export streams;
+  export exp;
+}

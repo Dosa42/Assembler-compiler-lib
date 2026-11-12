@@ -1,0 +1,3 @@
+(module
+  (data (;0;) (i32.load align=32768) "")
+)
