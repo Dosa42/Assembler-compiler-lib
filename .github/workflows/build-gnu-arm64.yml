@@ -1,0 +1,269 @@
+name: Build GNU ARM64 executables
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build-gnu-arm64.yml
+      - sources/**
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Component to build
+        type: choice
+        default: all
+        options: [all, gcc, binutils, gdb, newlib, glibc]
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      components: ${{ steps.matrix.outputs.components }}
+    steps:
+      - name: Select build components
+        id: matrix
+        env:
+          REQUESTED_COMPONENT: ${{ inputs.component || 'all' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          components = ['gcc', 'binutils', 'gdb', 'newlib', 'glibc']
+          selected = os.environ['REQUESTED_COMPONENT']
+          if selected != 'all':
+              if selected not in components:
+                  raise ValueError(selected)
+              components = [selected]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('components=' + json.dumps(components) + '\n')
+          PY
+
+  build:
+    needs: plan
+    name: Build ${{ matrix.component }} for ARM64
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.plan.outputs.components) }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    env:
+      COMPONENT: ${{ matrix.component }}
+      MAKE_JOBS: '3'
+      CFLAGS: -O2 -g0
+      CXXFLAGS: -O2 -g0
+      CFLAGS_FOR_TARGET: -O2 -g0
+      CXXFLAGS_FOR_TARGET: -O2 -g0
+    steps:
+      - name: Check out imported sources
+        uses: actions/checkout@v7.0.1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential bison flex texinfo gawk autoconf automake libtool pkg-config libgmp-dev libmpfr-dev libmpc-dev libisl-dev zlib1g-dev libzstd-dev libexpat1-dev libncurses-dev libreadline-dev liblzma-dev python3-dev gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          test "$(uname -m)" = aarch64
+          gcc --version
+          aarch64-linux-gnu-gcc --version
+
+      - name: Configure, compile, install and verify
+        run: |
+          python3 - <<'PY'
+          import datetime
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shlex
+          import shutil
+          import subprocess
+          import time
+
+          root = Path(os.environ['GITHUB_WORKSPACE'])
+          component = os.environ['COMPONENT']
+          jobs = os.environ['MAKE_JOBS']
+          work = root / 'build' / component
+          logs = root / 'build-logs' / component
+          stage = root / 'stage' / component
+          dist = root / 'dist'
+          for directory in (work, logs, stage, dist):
+              directory.mkdir(parents=True, exist_ok=True)
+          environment = dict(os.environ)
+          host = subprocess.check_output(['gcc', '-dumpmachine'], text=True).strip()
+          prefix = Path('/opt/gnu') / component
+          installed = stage / str(prefix).lstrip('/')
+          source_names = {'gcc': 'gcc', 'binutils': 'binutils-gdb', 'gdb': 'binutils-gdb', 'newlib': 'newlib-cygwin', 'glibc': 'glibc'}
+          source = root / 'sources' / source_names[component]
+          epoch = int(subprocess.check_output(['git', 'show', '-s', '--format=%ct', 'HEAD'], text=True).strip())
+          environment['SOURCE_DATE_EPOCH'] = str(epoch)
+          for tree in [source] + ([root / 'sources/gcc'] if component == 'newlib' else []):
+              for path in tree.rglob('*'):
+                  if path.is_file() or path.is_symlink():
+                      os.utime(path, (epoch, epoch), follow_symlinks=False)
+          checks = []
+
+          def run(label, command, cwd=work, env=None):
+              print(label + ': ' + shlex.join([str(x) for x in command]), flush=True)
+              logfile = logs / (label + '.log')
+              with logfile.open('w') as output:
+                  process = subprocess.Popen([str(x) for x in command], cwd=cwd, env=env or environment, stdout=output, stderr=subprocess.STDOUT)
+                  while process.poll() is None:
+                      try:
+                          process.wait(timeout=30)
+                      except subprocess.TimeoutExpired:
+                          print(label + ' is running', flush=True)
+                  if process.returncode:
+                      print('\n'.join(logfile.read_text(errors='replace').splitlines()[-100:]), flush=True)
+                      raise subprocess.CalledProcessError(process.returncode, command)
+              print(label + ' passed', flush=True)
+              return logfile.read_text(errors='replace') if logfile.stat().st_size < 1000000 else ''
+
+          def configure(directory, src, flags, env=None):
+              directory.mkdir(parents=True, exist_ok=True)
+              run(directory.name + '-configure', [src / 'configure', *flags], directory, env)
+
+          common = ['--prefix=' + str(prefix), '--build=' + host, '--host=' + host, '--disable-nls', '--disable-werror']
+          if component == 'gcc':
+              configure(work, source, [*common, '--target=aarch64-linux-gnu', '--enable-languages=c,c++', '--disable-bootstrap', '--disable-multilib', '--enable-checking=release', '--with-system-zlib'])
+              run('compile', ['make', '-j' + jobs])
+              run('install', ['make', 'DESTDIR=' + str(stage), 'install'])
+          elif component == 'binutils':
+              configure(work, source, [*common, '--target=aarch64-linux-gnu', '--disable-gdb', '--disable-gdbserver', '--disable-sim', '--disable-gprofng', '--program-prefix=aarch64-linux-gnu-', '--enable-plugins', '--with-system-zlib'])
+              run('compile', ['make', '-j' + jobs])
+              run('install', ['make', 'DESTDIR=' + str(stage), 'install'])
+          elif component == 'gdb':
+              configure(work, source, [*common, '--target=aarch64-linux-gnu', '--disable-binutils', '--disable-gas', '--disable-ld', '--disable-gold', '--disable-gprof', '--disable-gprofng', '--disable-sim', '--enable-gdb', '--enable-gdbserver', '--with-python=/usr/bin/python3', '--with-system-readline', '--without-debuginfod'])
+              run('compile', ['make', '-j' + jobs, 'all-gdb', 'all-gdbserver'])
+              run('install', ['make', 'DESTDIR=' + str(stage), 'install-gdb', 'install-gdbserver'])
+          elif component == 'glibc':
+              prefix = Path('/usr')
+              installed = stage / 'usr'
+              configure(work, source, ['--prefix=/usr', '--libdir=/usr/lib', '--build=' + host, '--host=' + host, '--disable-werror', '--with-headers=/usr/include'])
+              run('compile', ['make', '-j' + jobs])
+              run('install', ['make', 'install_root=' + str(stage), 'install'])
+          elif component == 'newlib':
+              bootstrap = work / 'bootstrap'
+              bootstrap_build = work / 'bootstrap-build'
+              configure(bootstrap_build, root / 'sources/gcc', ['--prefix=' + str(bootstrap), '--build=' + host, '--host=' + host, '--target=aarch64-none-elf', '--enable-languages=c', '--disable-bootstrap', '--disable-multilib', '--disable-nls', '--disable-werror', '--disable-shared', '--disable-threads', '--without-headers', '--with-newlib', '--with-as=/usr/bin/aarch64-linux-gnu-as', '--with-ld=/usr/bin/aarch64-linux-gnu-ld'])
+              run('bootstrap-compile', ['make', '-j' + jobs, 'all-gcc'], bootstrap_build)
+              run('bootstrap-install', ['make', 'install-gcc'], bootstrap_build)
+              environment['PATH'] = str(bootstrap / 'bin') + os.pathsep + environment['PATH']
+              environment['CC_FOR_TARGET'] = str(bootstrap / 'bin/aarch64-none-elf-gcc')
+              for variable, tool in [('AR_FOR_TARGET', 'ar'), ('AS_FOR_TARGET', 'as'), ('LD_FOR_TARGET', 'ld'), ('RANLIB_FOR_TARGET', 'ranlib'), ('NM_FOR_TARGET', 'nm'), ('OBJDUMP_FOR_TARGET', 'objdump'), ('READELF_FOR_TARGET', 'readelf')]:
+                  environment[variable] = '/usr/bin/aarch64-linux-gnu-' + tool
+              configure(work, source, [*common, '--target=aarch64-none-elf', '--disable-multilib'])
+              run('compile', ['make', '-j' + jobs])
+              run('install', ['make', 'DESTDIR=' + str(stage), 'install'])
+
+          smoke = work / 'smoke'
+          smoke.mkdir()
+          hello = smoke / 'hello.c'
+          hello.write_text('#include <stdio.h>\nint main(void) { return puts("GNU ARM64 OK") < 0; }\n')
+          if component == 'gcc':
+              cc = installed / 'bin/gcc'
+              cxx = installed / 'bin/g++'
+              run('gcc-version', [cc, '--version'])
+              run('gcc-compile', [cc, hello, '-o', smoke / 'hello'])
+              output = run('gcc-execute', [smoke / 'hello'])
+              assert 'GNU ARM64 OK' in output
+              cpp = smoke / 'hello.cpp'
+              cpp.write_text('#include <iostream>\n#include <vector>\nint main() { std::vector<int> v{20,22}; std::cout << v[0]+v[1] << std::endl; }\n')
+              run('gxx-compile', [cxx, cpp, '-o', smoke / 'hello-cpp', '-Wl,-rpath,' + str(installed / 'lib64'), '-Wl,-rpath,' + str(installed / 'lib')])
+              output = run('gxx-execute', [smoke / 'hello-cpp'])
+              assert output.strip() == '42'
+              checks.extend(['GCC compiles and executes C', 'G++ compiles and executes C++'])
+          elif component == 'binutils':
+              assembler = installed / 'bin/aarch64-linux-gnu-as'
+              linker = installed / 'bin/aarch64-linux-gnu-ld'
+              assembly = smoke / 'answer.s'
+              assembly.write_text('.text\n.global answer\n.type answer, %function\nanswer:\nmov w0, 42\nret\n.section .note.GNU-stack,"",%progbits\n')
+              run('assemble', [assembler, '-o', smoke / 'answer.o', assembly])
+              main = smoke / 'main.c'
+              main.write_text('extern int answer(void); int main(void) { return answer() == 42 ? 0 : 1; }\n')
+              toolchain = smoke / 'toolchain'
+              toolchain.mkdir()
+              (toolchain / 'ld').symlink_to(linker)
+              (toolchain / 'as').symlink_to(assembler)
+              run('link', ['gcc', '-B' + str(toolchain) + '/', main, smoke / 'answer.o', '-o', smoke / 'answer'])
+              run('execute', [smoke / 'answer'])
+              run('linker-version', [linker, '--version'])
+              run('inspect-elf', [installed / 'bin/aarch64-linux-gnu-readelf', '-h', smoke / 'answer'])
+              checks.append('Built assembler and linker produce an executable returning 42')
+          elif component == 'gdb':
+              run('compile-debuggee', ['gcc', '-g', '-O0', hello, '-o', smoke / 'hello'])
+              debugger = installed / 'bin/gdb'
+              if not debugger.exists():
+                  debugger = installed / 'bin/aarch64-linux-gnu-gdb'
+              output = run('debug', [debugger, '--batch', '-nx', '-ex', 'set pagination off', '-ex', 'file ' + str(smoke / 'hello'), '-ex', 'break main', '-ex', 'run', '-ex', 'print 6*7', '-ex', 'continue'])
+              assert '= 42' in output and 'GNU ARM64 OK' in output
+              server = installed / 'bin/gdbserver'
+              if not server.exists():
+                  server = installed / 'bin/aarch64-linux-gnu-gdbserver'
+              run('gdbserver-version', [server, '--version'])
+              checks.append('Built GDB runs a debuggee, hits main and evaluates 6*7')
+          elif component == 'glibc':
+              run('compile-test', ['gcc', hello, '-o', smoke / 'hello'])
+              loaders = [p for p in stage.rglob('ld-linux-aarch64.so.1') if p.exists()]
+              assert loaders, 'Installed ARM64 dynamic loader missing'
+              library_path = ':'.join(str(p) for p in [stage / 'usr/lib', stage / 'lib', stage / 'lib64'] if p.exists())
+              output = run('execute-new-glibc', [loaders[0], '--library-path', library_path, smoke / 'hello'])
+              assert 'GNU ARM64 OK' in output
+              checks.append('Executable runs with newly built Glibc dynamic loader and libc')
+          elif component == 'newlib':
+              library = installed / 'aarch64-none-elf/lib/libc.a'
+              assert library.is_file(), 'Newlib libc.a missing'
+              main = smoke / 'newlib.c'
+              main.write_text('#include <string.h>\nint main(void) { return strlen("newlib") == 6 ? 0 : 1; }\n')
+              run('link-newlib-elf', [environment['CC_FOR_TARGET'], '-fno-builtin', '-nostdlib', '-I' + str(installed / 'aarch64-none-elf/include'), main, '-L' + str(library.parent), '-Wl,-e,main', '-lc', '-o', smoke / 'newlib.elf'])
+              output = run('inspect-newlib-elf', ['aarch64-linux-gnu-readelf', '-h', smoke / 'newlib.elf'])
+              assert 'AArch64' in output
+              checks.append('Bare-metal AArch64 ELF links against newly built Newlib libc.a')
+
+          metadata = installed / 'share/gnu-build'
+          metadata.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(root / 'sources/upstreams.json', metadata / 'upstreams.json')
+          report = {'component': component, 'host': host, 'target': 'aarch64-none-elf' if component == 'newlib' else 'aarch64-linux-gnu', 'repository_commit': os.environ['GITHUB_SHA'], 'checks': checks, 'completed_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+          (metadata / 'build.json').write_text(json.dumps(report, indent=2) + '\n')
+          (metadata / 'SOURCE.txt').write_text('Source repository: https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/tree/' + os.environ['GITHUB_SHA'] + '/sources/' + source_names[component] + '\n')
+          license_root = metadata / 'licenses'
+          for pattern in ['COPYING*', 'LICENSE*', 'gcc/COPYING*', 'libgcc/COPYING*', 'libstdc++-v3/COPYING*']:
+              for path in source.glob(pattern):
+                  if path.is_file():
+                      destination = license_root / path.relative_to(source)
+                      destination.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copy2(path, destination)
+          archive = dist / (component + '-ubuntu-24.04-arm64.tar.xz')
+          archive_env = dict(environment, XZ_OPT='-T2 -1')
+          run('package', ['tar', '--sort=name', '--mtime=@' + str(epoch), '--owner=0', '--group=0', '--numeric-owner', '-cJf', archive, '-C', stage, '.'], env=archive_env)
+          digest = hashlib.sha256()
+          with archive.open('rb') as stream:
+              for chunk in iter(lambda: stream.read(1048576), b''):
+                  digest.update(chunk)
+          archive.with_suffix(archive.suffix + '.sha256').write_text(digest.hexdigest() + '  ' + archive.name + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(component + ': build and verification passed\n\n' + '\n'.join('- ' + item for item in checks) + '\n')
+          PY
+
+      - name: Upload executables and installed libraries
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ matrix.component }}-ubuntu-24.04-arm64
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ matrix.component }}-build-logs
+          path: |
+            build-logs/
+            build/**/config.log
+          if-no-files-found: ignore
+          retention-days: 14
