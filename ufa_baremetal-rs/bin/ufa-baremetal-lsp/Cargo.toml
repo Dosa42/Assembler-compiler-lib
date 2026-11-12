@@ -1,0 +1,24 @@
+[package]
+name = "ufa-baremetal-lsp"
+description = "Language Server (LSP) for the K01-K06 invariant checker -- diagnostics as you type in any LSP-capable editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "ufa-baremetal-lsp"
+path = "src/main.rs"
+
+[dependencies]
+ufa_baremetal_core = { path = "../../lib/ufa_baremetal_core" }
+# Intentionally none beyond the core crate. The LSP base protocol
+# (ROADMAP.md item #4) is just newline-free `Content-Length`-framed
+# JSON-RPC over stdio -- fully specified, and small enough that hand-
+# rolling the framing + JSON (de)serialization in src/{rpc,json_value}.rs
+# keeps this binary buildable with only `cargo` and no crates.io
+# reachability, continuing the same "stdlib only" discipline as the core
+# + CLI (see lib/ufa_baremetal_core/Cargo.toml's own comment on this).
+# Unlike bin/ufa-baremetal-gui, there's no unavoidable-external-dependency
+# case here to make an exception for.

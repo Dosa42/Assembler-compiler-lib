@@ -1,0 +1,59 @@
+[package]
+name = "ufa-baremetal-wasm"
+description = "WASM build of the K01-K06 checker for the browser playground (www/index.html)"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Proprietary"
+authors = ["UFA Bare-Metal Canon"]
+
+# Deliberately its own standalone workspace (this empty table, not a
+# `members` entry in the parent ../../Cargo.toml) rather than a member of
+# the parent workspace. Two reasons:
+#
+# 1. Cargo only reads `[profile.*]` from a workspace ROOT -- a member
+#    crate's own `[profile.release]` is silently ignored. This crate
+#    needs `panic = "abort"` (see below), and the parent workspace can't
+#    have that set globally without also flipping it on for the CLI/GUI,
+#    which would break `cargo test`'s ability to catch one test's panic
+#    and keep running the rest.
+# 2. It keeps `cargo build --workspace` at the repo root exactly as fast
+#    and dependency-free as it already is for everyone who isn't touching
+#    the WASM playground -- this crate (and its build-std cross-compile
+#    requirements, see ../../README.md) stays opt-in.
+#
+# The path dependency below works fine across workspace boundaries; Cargo
+# builds `ufa_baremetal_core` fresh under *this* workspace's profile
+# either way, so nothing about the core crate's own build is affected.
+[workspace]
+
+[lib]
+# `cdylib` is what produces a loadable `.wasm` module (rather than an
+# `.rlib` for other Rust code to link against) -- the same crate-type
+# every wasm-bindgen project uses, just without wasm-bindgen itself here
+# (see src/lib.rs's module doc for why).
+crate-type = ["cdylib"]
+
+[dependencies]
+ufa_baremetal_core = { path = "../../lib/ufa_baremetal_core" }
+# No other dependencies, including no wasm-bindgen: the exported ABI
+# (alloc/dealloc/check, all plain pointer+length `extern "C" fn`s -- see
+# src/lib.rs) is hand-rolled the same way this workspace already
+# hand-rolls its own JSON writer instead of pulling in `serde_json`. It
+# also sidesteps wasm-bindgen's separate `wasm-bindgen-cli`
+# post-processing step, which has to be version-matched exactly against
+# the `wasm-bindgen` crate and isn't available in every environment the
+# way `cargo build --target wasm32-unknown-unknown` on its own is.
+
+[profile.release]
+# A browser playground wants a small download, and there's no reason to
+# pay for unwind-table bookkeeping in a module JS only ever calls into
+# through three flat entry points -- if a check panics on malformed
+# input, "the WASM instance traps and the JS side reports an error" is
+# an entirely acceptable failure mode here, unlike a long-running native
+# process where unwinding to a `catch_unwind` boundary might matter.
+# `panic = "abort"` also sidesteps needing wasm's exception-handling
+# proposal support (not universal across runtimes/browsers) just to link.
+panic = "abort"
+opt-level = "s"
+lto = true

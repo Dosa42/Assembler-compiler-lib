@@ -1,0 +1,21 @@
+[package]
+name = "ufa_baremetal_core"
+description = "K01-K06 invariant checks over emitted AArch64 assembly (Rust port of ufa_baremetal)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Intentionally none. The Python original's own non-negotiable (brief §5.1)
+# is "stdlib only, no third-party deps beyond pytest" -- this port keeps
+# that discipline for the core+CLI: pattern matching, JSON, SHA-256, and
+# UTC-timestamp formatting are all hand-rolled against the standard library
+# (see src/{pattern,json,sha256,datetime}.rs) rather than pulling in
+# `regex`/`serde`/`sha2`/`chrono`. This also means a K-check pipeline can
+# run in a locked-down / air-gapped embedded CI runner with only `cargo`
+# and no crates.io reachability -- fitting for a bare-metal tool.
+
+[dev-dependencies]
+# None either -- the test suite in tests/ uses only #[test] + std::assert*.

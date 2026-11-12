@@ -1,0 +1,57 @@
+· mmio_base ─ UINT64 ─ 0x09000000 ◇
+
+△ neg_test ○ x ─ INT32 ─ INT32 ═╗
+║ · a ─ INT32 ─ -x ◇
+║ · b ─ INT32 ─ ~x ◇
+║ · c ─ INT32 ─ -5 ◇
+║ → a + b + c ◇
+╚═══ 1 ═══╝
+
+△ hex_bin_test ○ VOID ─ UINT64 ═╗
+║ · h ─ UINT64 ─ 0xDEADBEEF ◇
+║ · b ─ UINT64 ─ 0b1010101 ◇
+║ · big ─ UINT64 ─ 4294967296 ◇
+║ · bigger ─ UINT64 ─ 1099511627776 ◇
+║ · huge ─ UINT64 ─ 281474976710656 ◇
+║ · neg ─ INT64 ─ -100 ◇
+║ · negbig ─ INT64 ─ -100000 ◇
+║ → h + b + big ◇
+╚═══ 1 ═══╝
+
+△ addr_test ○ VOID ─ UINT64 ═╗
+║ · x ─ UINT64 ─ 5 ◇
+║ · arr ─ UINT64[4] ─ 0 ◇
+║ · p1 ─ UINT64 ─ &x ◇
+║ · p2 ─ UINT64 ─ &arr[2] ◇
+║ → p1 + p2 ◇
+╚═══ 1 ═══╝
+
+△ mmio_test ○ VOID ─ UINT64 ═╗
+║ · v ─ UINT64 ─ mem[mmio_base] ◇
+║ mem[mmio_base] ─ v ◇
+║ → v ◇
+╚═══ 1 ═══╝
+
+△ prec_test ○ a ─ UINT64 ─ b ─ UINT64 ─ c ─ UINT64 ─ UINT64 ═╗
+║ · r ─ UINT64 ─ a + b * c ◇
+║ · s ─ UINT64 ─ (a + b) * c ◇
+║ · t ─ UINT64 ─ a << 2 | b >> 1 ◇
+║ · u ─ UINT64 ─ a % c ◇
+║ → r + s + t + u ◇
+╚═══ 1 ═══╝
+
+△ incr_test ○ VOID ─ UINT64 ═╗
+║ · x ─ UINT64 ─ 5 ◇
+║ x ─ ─ ◇
+║ → x ◇
+╚═══ 1 ═══╝
+
+△ or_and_test ○ a ─ UINT64 ─ b ─ UINT64 ─ UINT64 ═╗
+║ Φ a > 0 ∧ b > 0 ═╗
+║ ║ → 1 ◇
+║ ╚═══ 2 ═══╝
+║ Φ a > 0 ∨ b > 0 ═╗
+║ ║ → 2 ◇
+║ ╚═══ 2 ═══╝
+║ → 0 ◇
+╚═══ 1 ═══╝

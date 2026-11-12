@@ -1,0 +1,14 @@
+□ S ═╗
+║ v ─ U32
+║ vec ─ U32[8]
+═╗
+
+△ tst ○ a ─ U32 ─ s ─ @S ─ i ─ U32 ─ U32 ═╗
+║  · x ─ U32 ─ a ◇
+║  x ─ ─ ◇                          /* simple var          */
+║  · arr ─ U32[4] ─ 0 ◇
+║  arr[0] ─ ─ ◇                     /* array element       */
+║  s ─ △ v ─ ─ ◇                    /* struct field        */
+║  s ─ △ vec[i] ─ ─ ◇                /* struct field arr   */
+║  → x ◇
+╚═══ 1 ═══╝

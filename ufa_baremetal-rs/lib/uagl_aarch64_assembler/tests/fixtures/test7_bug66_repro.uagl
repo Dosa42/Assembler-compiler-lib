@@ -1,0 +1,6 @@
+△ cache_clean_invalidate ○ start ─ U64 ─ end ─ U64 ─ line_sz ─ U64 ─ VOID ═╗
+║ · addr ─ U64 ─ 0 ◇
+║ · end_align ─ U64 ─ 0 ◇
+║ addr ─ start ─ addr ◇
+║ end_align ─ end ─ ─ line_sz ─ end_align ◇
+╚═══ 1 ═══╝

@@ -1,0 +1,41 @@
+[package]
+name = "ufa-baremetal-gui"
+description = "Native GUI for the K01-K06 invariant checker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# Not `rust-version.workspace = true`: egui/eframe 0.35's own MSRV runs
+# ahead of the workspace-wide 1.75 floor declared for the (dependency-free)
+# core + CLI. Only this crate needs a newer toolchain.
+rust-version = "1.85"
+
+[[bin]]
+name = "ufa-baremetal-gui"
+path = "src/main.rs"
+
+[dependencies]
+ufa_baremetal_core = { path = "../../lib/ufa_baremetal_core" }
+uagl_aarch64_assembler = { path = "../../lib/uagl_aarch64_assembler" }
+# The one unavoidable external dependency in this workspace: there is no
+# GUI framework in std, so "stdlib only" isn't an option here the way it
+# is for the core + CLI. egui/eframe chosen as a pure-Rust, single-binary,
+# cross-platform immediate-mode GUI with no system GTK/Qt dependency.
+#
+# Pinned to the current release as of when this was written (0.35.0,
+# 2026-06-25) confirmed via web search, since this sandbox has no network
+# access to crates.io to verify by actually building. If `cargo build`
+# reports a version-resolution or API-mismatch error here, egui's API has
+# likely moved on since — bump this to whatever `cargo add eframe` picks
+# and paste me the resulting compiler errors, if any; egui's widget-level
+# API (Button, TextEdit, ScrollArea, CollapsingHeader, RichText, Color32)
+# has been very stable across recent 0.3x releases, so most of app.rs
+# should survive a version bump untouched even if it needs some changes.
+#
+# Default features left on deliberately (not narrowed with
+# default-features = false) -- that pulls in the renderer backend, default
+# fonts, and native windowing eframe needs to just work, matching every
+# current eframe example rather than guessing at exact current feature
+# flag names.
+egui = "0.35"
+eframe = "0.35"

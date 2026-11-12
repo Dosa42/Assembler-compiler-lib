@@ -1,0 +1,30 @@
+# Helix integration for ufa-baremetal-lsp.
+#
+# Merge this into your Helix config's languages.toml (`hx --health` shows
+# where Helix looks -- typically `~/.config/helix/languages.toml`, merged
+# on top of Helix's own built-in defaults, so this ADDS a language server
+# option rather than replacing anything).
+#
+# INSTALL
+#   1. `cargo build --release -p ufa-baremetal-lsp` from the workspace
+#      root, then put the resulting `target/release/ufa-baremetal-lsp`
+#      on your $PATH (or use an absolute `command` below).
+#   2. Copy the two tables below into your languages.toml.
+#   3. `:lsp-restart` inside Helix (or just reopen the `.s` file).
+#
+# Helix doesn't ship a built-in "asm" language definition matched to this
+# project's own dialect, so this defines a minimal one scoped to `.s`
+# files. If you already have an `[[language]]` entry for `.s`/assembly in
+# your config, just add `language-servers = ["ufa-baremetal-lsp"]` to
+# your existing entry instead of adding a second one here.
+
+[language-server.ufa-baremetal-lsp]
+command = "ufa-baremetal-lsp"
+
+[[language]]
+name = "ufa-baremetal-asm"
+scope = "source.asm"
+file-types = ["s"]
+roots = [".git", "Cargo.toml"]
+comment-token = "//"
+language-servers = ["ufa-baremetal-lsp"]

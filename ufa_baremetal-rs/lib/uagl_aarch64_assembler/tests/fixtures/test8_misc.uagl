@@ -1,0 +1,22 @@
+#PRAGMA strict-align
+// a double-slash comment
+/* inline comment */ · x1 ─ UINT64 ─ 1 ◇
+
+□ Pt ═╗
+║ a ─ UINT32
+║ b ─ UINT32
+═╗
+
+· pts ─ Pt[10] ─ 0 ◇
+
+△ many_args ○ a─UINT64─b─UINT64─c─UINT64─d─UINT64─e─UINT64─f─UINT64─g─UINT64─h─UINT64─i─UINT64─UINT64 ═╗
+║ → a + i ◇
+╚═══ 1 ═══╝
+
+△ caller ○ VOID ─ UINT64 ═╗
+║ → many_args ○ 1 ─ 2 ─ 3 ─ 4 ─ 5 ─ 6 ─ 7 ─ 8 ─ 9 ◇
+╚═══ 1 ═══╝
+
+△ validate_many ○ VOID ═╗
+║ Ω ○ 1 ─ 2 ─ 3 ─ 4 ─ 5 ─ 6 ◇
+╚═══ 1 ═══╝

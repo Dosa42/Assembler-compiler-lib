@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "lib/ufa_baremetal_core",
+    "lib/uagl_aarch64_assembler",
+    "bin/uagl-assembler-wasm",
+    "bin/ufa-baremetal",
+    "bin/ufa-baremetal-gui",
+    "bin/ufa-baremetal-lsp",
+]
+exclude = ["c-uagl-rust"]
+
+# The CLI is the default target for a bare `cargo run` at the workspace root.
+default-members = [
+    "lib/ufa_baremetal_core",
+    "bin/ufa-baremetal",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Proprietary"
+authors = ["UFA Bare-Metal Canon"]
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[profile.dev]
+# K-checks run over ~400KB of .s text per the brief's own non-negotiables
+# (§5.1: "sub-second for ~400KB of emitted .s"); debug-level opt keeps the
+# dev-build fast enough not to notice, without paying full release build time.
+opt-level = 1

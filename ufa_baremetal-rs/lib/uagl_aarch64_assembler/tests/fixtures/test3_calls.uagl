@@ -1,0 +1,45 @@
+· fnptr ─ UINT64 ─ &helper ◇
+
+△ helper ○ x ─ UINT64 ─ UINT64 ═╗
+║ → x + 1 ◇
+╚═══ 1 ═══╝
+
+△ copy_bytes ○ dst ─ UINT64 ─ src ─ UINT64 ─ n ─ UINT64 ─ VOID ═╗
+║ __memcpy ○ dst ─ src ─ n ◇
+╚═══ 1 ═══╝
+
+△ zero_bytes ○ dst ─ UINT64 ─ n ─ UINT64 ─ VOID ═╗
+║ __memset ○ dst ─ 0 ─ n ◇
+╚═══ 1 ═══╝
+
+△ raw_asm ○ VOID ═╗
+║ __asm__ ○ "NOP" ◇
+╚═══ 1 ═══╝
+
+△ call_indirect ○ v ─ UINT64 ─ UINT64 ═╗
+║ · f ─ UINT64 ─ fnptr ◇
+║ → f ○ v ◇
+╚═══ 1 ═══╝
+
+△ read_daif ○ VOID ─ UINT64 ═╗
+║ · d ─ UINT64 ─ 0 ◇
+║ ○ d ─ DAIF ◇
+║ → d ◇
+╚═══ 1 ═══╝
+
+△ write_daif ○ v ─ UINT64 ─ VOID ═╗
+║ ○ DAIF ─ v ◇
+╚═══ 1 ═══╝
+
+△ pair ○ a ─ UINT64 ─ b ─ UINT64 ─ UINT64 ═╗
+║ → a ‖ b ◇
+╚═══ 1 ═══╝
+
+△ use_pair ○ VOID ─ UINT64 ═╗
+║ · p ─ UINT64 ─ 0 ◇
+║ · q ─ UINT64 ─ 0 ◇
+║ ← p ─ q ─ pair ○ 5 ─ 9 ◇
+║ □ ◇
+║ Ω ○ p ─ q ◇
+║ → p ◇
+╚═══ 1 ═══╝

@@ -1,0 +1,46 @@
+□ Point ═╗
+║ x ─ INT32
+║ y ─ INT32
+║ z ─ UINT64
+═╗
+
+□ Line ═╗
+║ a ─ Point
+║ b ─ Point
+═╗
+
+· counter ─ UINT64 ─ 0 ◇
+· lookup ─ INT32[8] ─ [1,2,3,4,5,6,7,8] ◇
+· banner ─ U8[16] ─ "Hi there\n" ◇
+· scale ─ INT32 ─ 42 ◇
+
+△ dist ○ p ─ @Point ─ UINT64 ═╗
+║ · dx ─ INT32 ─ p ─ △ x ◇
+║ · dy ─ INT32 ─ p ─ △ y ◇
+║ → p ─ △ z ◇
+╚═══ 1 ═══╝
+
+△ set_point ○ p ─ @Point ─ nx ─ INT32 ─ ny ─ INT32 ─ VOID ═╗
+║ p ─ △ x ─ nx ◇
+║ p ─ △ y ─ ny ◇
+║ p ─ △ z ─ p ─ △ z + 1 ◇
+╚═══ 1 ═══╝
+
+△ touch_line ○ l ─ @Line ─ UINT64 ═╗
+║ l ─ △ a ─ △ x ─ 7 ◇
+║ → l ─ △ a ─ △ x ◇
+╚═══ 1 ═══╝
+
+△ use_arrays ○ idx ─ UINT64 ─ UINT64 ═╗
+║ · v ─ INT32 ─ lookup[idx] ◇
+║ lookup[idx] ─ v + 1 ◇
+║ counter ─ counter + 1 ◇
+║ → counter ◇
+╚═══ 1 ═══╝
+
+△ use_local_arr ○ VOID ═╗
+║ · buf ─ U8[32] ─ 0 ◇
+║ · nums ─ INT32[4] ─ 0 ◇
+║ · big ─ Point ─ 0 ◇
+║ → 0 ◇
+╚═══ 1 ═══╝

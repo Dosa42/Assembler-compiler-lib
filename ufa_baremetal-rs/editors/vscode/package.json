@@ -1,0 +1,32 @@
+{
+  "name": "ufa-baremetal-lsp-client",
+  "displayName": "UFA Bare-Metal K-Checks",
+  "description": "Live K01-K06 invariant-check diagnostics for emitted AArch64 assembly (.s), via ufa-baremetal-lsp.",
+  "version": "1.0.0",
+  "publisher": "ufa-bare-metal-canon",
+  "license": "SEE LICENSE IN ../../README.md",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Linters", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "UFA Bare-Metal K-Checks",
+      "properties": {
+        "ufaBaremetal.serverPath": {
+          "type": "string",
+          "default": "ufa-baremetal-lsp",
+          "description": "Path to the ufa-baremetal-lsp binary. Defaults to resolving it from $PATH (e.g. after `cargo install --path bin/ufa-baremetal-lsp`)."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "ufaBaremetal.restartServer",
+        "title": "UFA Bare-Metal: Restart K-Check Language Server"
+      }
+    ]
+  }
+}

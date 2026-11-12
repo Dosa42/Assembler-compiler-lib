@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C → UAGL → AArch64</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #edf2ef;
+    --panel: #fbfdfc;
+    --border: #cbd8d2;
+    --surface: #edf3ef;
+    --ink: #192820;
+    --muted: #485d51;
+    --accent: #195746;
+    --hover: #104638;
+    --focus: #285ca4;
+    --danger: #8a321e;
+    --danger-bg: #faeae4;
+    --warn: #744e12;
+    --warn-bg: #f9f0da;
+    --ok: #165544;
+    --ok-bg: #e4f1e9;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background: var(--bg);
+    font: 1rem/1.45 var(--sans);
+  }
+
+  .shell { max-width: 82rem; margin-inline: auto; padding-inline: clamp(0.75rem, 3vw, 2rem); }
+  .masthead { padding-block: clamp(1.2rem, 3vw, 2.1rem) 1.2rem; }
+  h1, h2, h3, p { margin-block: 0; }
+  h1 { font-size: clamp(1.6rem, 4vw, 2.45rem); line-height: 1.1; letter-spacing: -0.04em; }
+  h2 { font-size: 1.05rem; line-height: 1.3; }
+  h3 { font-size: 1rem; line-height: 1.3; }
+  code, pre, textarea, .mono { font-family: var(--mono); }
+  p, li, dd { overflow-wrap: anywhere; }
+  .subtle { color: var(--muted); font-size: 0.88rem; }
+  .masthead .subtle { margin-block-start: 0.45rem; }
+
+  .workbench { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr); gap: 1rem; padding-block-end: 2rem; }
+  .panel { min-width: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 0.6rem; }
+  .panel-head { padding: 0.8rem 1rem; border-block-end: 1px solid var(--border); }
+  .panel-body { padding: 0.85rem 1rem; }
+  .results-panel { grid-column: 1 / -1; }
+  .stack { display: grid; gap: 0.72rem; min-width: 0; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem 0.65rem; min-width: 0; }
+  .between { justify-content: space-between; }
+  .field { display: grid; gap: 0.28rem; min-width: 0; }
+  label, legend, .legend { font-size: 0.88rem; font-weight: 600; }
+  input, select, button, textarea { color: inherit; font: inherit; }
+  input[type=text], input[type=search], select, textarea, button {
+    max-width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 0.34rem;
+    background: var(--panel);
+  }
+
+  input[type=text], input[type=search], select, button { min-height: 2.25rem; padding: 0.28rem 0.55rem; }
+  input[type=file] { width: 100%; max-width: 100%; font-size: 0.88rem; }
+  input[type=checkbox] { accent-color: var(--accent); width: 1.02rem; height: 1.02rem; margin: 0; }
+  .choice { display: inline-flex; align-items: center; gap: 0.4rem; min-height: 2rem; cursor: pointer; }
+  :is(input, select, button, textarea, summary):focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  button { cursor: pointer; font-size: 0.88rem; font-weight: 650; }
+  button:hover:not(:disabled) { border-color: var(--accent); background: var(--surface); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { background: var(--hover); }
+  button:disabled { opacity: 0.58; cursor: default; }
+  textarea { width: 100%; min-height: 16rem; padding: 0.7rem; line-height: 1.5; resize: vertical; tab-size: 4; }
+  textarea[readonly] { background: var(--surface); }
+  fieldset { min-inline-size: 0; margin: 0; border: 1px solid var(--border); border-radius: 0.34rem; padding: 0.28rem 0.62rem; }
+  fieldset legend { padding-inline: 0.25rem; }
+  .step-list { margin: 0; padding-inline-start: 1.48rem; }
+  .step-row { padding: 0.52rem 0.58rem; border-block-start: 1px solid var(--border); margin-block-end: 0.35rem; }
+  .step-row::marker { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .step-row .field + .field { margin-block-start: 0.35rem; }
+  .step-row fieldset { margin-block-start: 0.45rem; }
+  .step-row .step-title { margin-block-end: 0.35rem; }
+  .slot-select { width: 100%; }
+  .status { color: var(--muted); min-height: 1.35rem; font-size: 0.88rem; }
+  .status[data-state="error"] { color: var(--danger); }
+  .manual { border-block-start: 1px solid var(--border); padding-block-start: 0.65rem; }
+  summary { cursor: pointer; font-weight: 650; }
+  details > .stack { margin-block-start: 0.65rem; }
+  .result-row { min-width: 0; border-block-start: 1px solid var(--border); padding-block: 0.7rem; display: grid; gap: 0.45rem; }
+  .result-row:first-child { border-block-start: 0; }
+  .result-row .artifact { background: var(--surface); border-radius: 0.3rem; padding: 0.4rem 0.55rem; min-width: 0; }
+  .result-row .artifact-name { overflow-wrap: anywhere; }
+  .badge { font-size: 0.8rem; font-weight: 700; border-radius: 0.3rem; padding: 0.12rem 0.4rem; color: var(--muted); background: var(--surface); }
+  .badge[data-status="pass"] { color: var(--ok); background: var(--ok-bg); }
+  .badge:is([data-status="fail"], [data-status="error"]) { color: var(--danger); background: var(--danger-bg); }
+  .badge:is([data-status="warn"], [data-status="warning"], [data-status="review"], [data-status="needs-ai"], [data-status="stale"]) { color: var(--warn); background: var(--warn-bg); }
+  .diagnostics { margin: 0; padding-inline-start: 1.4rem; font-size: 0.9rem; }
+  .diagnostics li + li { margin-block-start: 0.3rem; }
+  .diagnostics li .badge { margin-inline-end: 0.3rem; }
+  .preview { overflow: auto; max-height: 22rem; margin: 0; padding: 0.55rem; border: 1px solid var(--border); border-radius: 0.3rem; background: var(--panel); font-size: 0.83rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .preview[hidden] { display: none; }
+  .audit { border-block-start: 1px solid var(--border); padding-block-start: 0.75rem; }
+
+  @media (max-width: 50rem) {
+    .workbench { grid-template-columns: minmax(0, 1fr); }
+    :is(input[type=text], input[type=search], select, textarea, button) { font-size: 1rem; }
+  }
+  @media (max-width: 24rem) {
+    .panel-head, .panel-body { padding-inline: 0.6rem; }
+    .step-row { padding-inline: 0.25rem; }
+    textarea { min-height: 12rem; }
+  }
+</style>
+</head>
+<body>
+  <header class="shell masthead">
+    <h1>C → UAGL → AArch64</h1>
+    <p class="subtle">Open bronbestanden en voer stappen uit in je browser.</p>
+    <p id="wss-status" class="status" role="status">Open Unified via HTTP of HTTPS.</p>
+  </header>
+  <main class="shell workbench" hidden>
+    <section class="panel" aria-labelledby="inputs-heading">
+      <div class="panel-head"><h2 id="inputs-heading">Invoer</h2></div>
+      <div class="panel-body stack">
+        <div class="field">
+          <label for="input-kind">Bestandstype</label>
+          <select id="input-kind">
+            <option value="c">C-bron (.c of .h)</option>
+            <option value="uagl" selected>UAGL (.uagl)</option>
+            <option value="uaglbr">UAGLBR (.uaglbr)</option>
+            <option value="asm">AArch64-assembly (.s)</option>
+            <option value="reference">Referentie-assembly (.s)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="input-file">Bestand openen</label>
+          <input id="input-file" type="file" accept=".uagl">
+        </div>
+        <div class="field">
+          <label for="input-name">Bestandsnaam</label>
+          <input id="input-name" type="text" autocomplete="off" spellcheck="false" value="invoer.uagl">
+        </div>
+        <div class="field" id="input-editor">
+          <label for="input-text">Bestandstekst</label>
+          <textarea id="input-text" autocomplete="off" spellcheck="false" wrap="off"></textarea>
+        </div>
+        <div class="row">
+          <button id="input-clear" type="button" disabled>Invoer wissen</button>
+          <button id="input-download" type="button" disabled>Invoer downloaden</button>
+        </div>
+        <p id="input-status" class="status" role="status"></p>
+      </div>
+    </section>
+    <section class="panel" aria-labelledby="pipeline-heading">
+      <div class="panel-head row between">
+        <h2 id="pipeline-heading">Pipeline</h2>
+        <button id="pipeline-run" class="primary" type="button" aria-describedby="pipeline-status">Run pipeline</button>
+      </div>
+      <div class="panel-body stack">
+        <div class="field">
+          <label for="pipeline-mode">Voorinstelling</label>
+          <select id="pipeline-mode">
+            <option value="c">C → UAGL → AArch64</option>
+            <option value="uagl" selected>UAGL → AArch64</option>
+            <option value="uaglbr">UAGLBR → AArch64</option>
+            <option value="check-first">K-checks → Assembler → Verify</option>
+            <option value="fidelity">C → UAGL → Fidelity → C</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+        <div class="row">
+          <label id="pipeline-verify-option" class="choice"><input id="pipeline-verify" type="checkbox"> Voeg Verify toe</label>
+          <label class="choice"><input id="converter-validation" type="checkbox" checked> Convertervalidatie</label>
+          <label class="choice"><input id="stop-on-error" type="checkbox"> Stop bij fouten</label>
+        </div>
+        <fieldset id="k-selection">
+          <legend>K-checks</legend>
+          <div class="row">
+            <label class="choice"><input type="checkbox" name="k-check" value="K01" checked> K01</label>
+            <label class="choice"><input type="checkbox" name="k-check" value="K02" checked> K02</label>
+            <label class="choice"><input type="checkbox" name="k-check" value="K03" checked> K03</label>
+            <label class="choice"><input type="checkbox" name="k-check" value="K04" checked> K04</label>
+            <label class="choice"><input type="checkbox" name="k-check" value="K05" checked> K05</label>
+            <label class="choice"><input type="checkbox" name="k-check" value="K06" checked> K06</label>
+          </div>
+        </fieldset>
+        <ol id="pipeline-steps" class="step-list" aria-label="Pipelinestappen"></ol>
+        <div id="pipeline-custom" class="row" hidden>
+          <label for="pipeline-add-step">Stap</label>
+          <select id="pipeline-add-step"></select>
+          <button id="pipeline-add" type="button">Stap toevoegen</button>
+        </div>
+        <details>
+          <summary>Pipelineconfiguratie</summary>
+          <div class="stack">
+            <div class="field">
+              <label for="pipeline-config-file">JSON-configuratie importeren</label>
+              <input id="pipeline-config-file" type="file" accept=".json,application/json">
+            </div>
+            <div><button id="pipeline-config-export" type="button">JSON-configuratie exporteren</button></div>
+            <p id="config-status" class="status" role="status"></p>
+          </div>
+        </details>
+        <details class="manual">
+          <summary>Één stap uitvoeren</summary>
+          <div class="stack">
+            <div class="field">
+              <label for="manual-operation">Bewerking</label>
+              <select id="manual-operation"></select>
+            </div>
+            <div id="manual-inputs" class="stack"></div>
+            <div><button id="manual-run" type="button" aria-describedby="manual-status">Run stap</button></div>
+            <p id="manual-status" class="status" role="status"></p>
+          </div>
+        </details>
+        <p id="pipeline-status" class="status" role="status"></p>
+      </div>
+    </section>
+    <section class="panel results-panel" aria-labelledby="results-heading">
+      <div class="panel-head row between">
+        <h2 id="results-heading">Resultaten</h2>
+        <span id="results-stale" class="badge" data-status="stale" hidden>Verouderd</span>
+      </div>
+      <div class="panel-body stack">
+        <div id="result-tools" class="row" hidden>
+          <label for="diagnostic-filter">Functie</label>
+          <input id="diagnostic-filter" type="search" placeholder="Functienaam" autocomplete="off">
+          <label for="k-filter">K-code</label>
+          <select id="k-filter">
+            <option value="">Alle K-codes</option>
+            <option value="K01">K01</option><option value="K02">K02</option>
+            <option value="K03">K03</option><option value="K04">K04</option>
+            <option value="K05">K05</option><option value="K06">K06</option>
+          </select>
+        </div>
+        <p id="results-empty" class="subtle">Voer een pipeline of een losse stap uit.</p>
+        <div id="pipeline-results"></div>
+        <details id="merged-audit" class="audit" hidden>
+          <summary>Gecombineerde diagnoses</summary>
+          <div class="stack">
+            <div><button id="merged-gaps-export" type="button">Diagnoses downloaden (.json)</button></div>
+            <ul id="merged-gaps-list" class="diagnostics"></ul>
+          </div>
+        </details>
+      </div>
+    </section>
+  </main>
+  <script>
+    const WASM_BASE64 = "__WASM_BASE64__";
+    const ASSEMBLER_WASM_BASE64 = "__ASSEMBLER_WASM_BASE64__";
+    const CONVERTER_WASM_BASE64 = "__CONVERTER_WASM_BASE64__";
+  </script>
+  <script>__PIPELINE_CORE_JS__</script>
+  <script>__WASM_TOOLS_JS__</script>
+  <script>
+  if (location.protocol === "http:" || location.protocol === "https:") {
+    document.querySelector("main.workbench").hidden = false;
+    const endpoint = "wss://0.0.0.0:9040";
+    const connectionStatus = document.getElementById("wss-status");
+
+    function showConnection(message, error = false) {
+      connectionStatus.textContent = message;
+      connectionStatus.dataset.state = error ? "error" : "";
+    }
+
+    showConnection("Verbinden met " + endpoint + "…");
+    try {
+      const socket = new WebSocket(endpoint);
+      socket.addEventListener("open", () => showConnection("Verbonden met " + endpoint));
+      socket.addEventListener("error", () => showConnection("Verbinding met " + endpoint + " mislukt.", true));
+      socket.addEventListener("close", () => {
+        if (connectionStatus.dataset.state !== "error") {
+          showConnection("Verbinding met " + endpoint + " gesloten.", true);
+        }
+      });
+    } catch {
+      showConnection("Verbinding met " + endpoint + " mislukt.", true);
+    }
+__UNIFIED_UI_JS__
+  }
+  </script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+╔═ mymodule ═╗
+
+□ Node ═╗
+║ val ─ INT32
+║ next ─ @Node
+═╗
+
+/* block comment
+   spanning multiple
+   lines */
+· BIGARR ─ UINT64[64] ─ 0 ◇
+· NEG_SCALAR ─ INT64 ─ -7 ◇
+· PTR_SCALAR ─ UINT64 ─ &worker ◇
+
+△ worker ○ VOID ═╗
+║ → 0 ◇
+╚═══ 1 ═══╝
+
+△ big_local ○ VOID ═╗
+║ · buf ─ UINT8[300] ─ 0 ◇  // trailing comment after code
+║ → 0 ◇
+╚═══ 1 ═══╝
+
+△ very_negative ○ VOID ─ INT64 ═╗
+║ · x ─ INT64 ─ -4294967297 ◇
+║ → x ◇
+╚═══ 1 ═══╝
+
+△ node_next ○ n ─ @Node ─ INT32 ═╗
+║ → n ─ △ val ◇
+╚═══ 1 ═══╝

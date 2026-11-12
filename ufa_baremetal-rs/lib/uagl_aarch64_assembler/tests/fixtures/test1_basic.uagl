@@ -1,0 +1,33 @@
+#PRAGMA target=aarch64-baremetal
+/* Basic arithmetic, control flow, and calls */
+
+△ add ○ a ─ UINT64 ─ b ─ UINT64 ─ UINT64 ═╗
+║ · sum ─ UINT64 ─ a + b ◇
+║ → sum ◇
+╚═══ 1 ═══╝
+
+△ compute ○ n ─ UINT64 ─ UINT64 ═╗
+║ · total ─ UINT64 ─ 0 ◇
+║ · i ─ UINT64 ─ 0 ◇
+║ ⁿ i < n ═╗
+║ ║ total ─ total + i ◇
+║ ║ i ─ i + 1 ◇
+║ ╚═══ 2 ═══╝
+║ Φ total > 100 ═╗
+║ ║ total ─ 100 ◇
+║ ▽ ═╗
+║ ║ total ─ total + 1 ◇
+║ ╚═══ 2 ═══╝
+║ → total ◇
+╚═══ 1 ═══╝
+
+△ main ○ VOID ═╗
+║ · x ─ UINT64 ─ add ○ 3 ─ 4 ◇
+║ · y ─ UINT64 ─ compute ○ 10 ◇
+║ println ○ x ◇
+║ Φ x △ y ═╗
+║ ║ println ○ 1 ◇
+║ ╚═══ 2 ═══╝
+║ ∅ ◇
+║ → 0 ◇
+╚═══ 1 ═══╝

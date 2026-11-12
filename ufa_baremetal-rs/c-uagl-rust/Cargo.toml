@@ -1,0 +1,20 @@
+[package]
+name = "c-uagl-converter"
+version = "0.1.0"
+edition = "2021"
+publish = false
+default-run = "linux_converter"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+regex = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[[bin]]
+name = "linux_converter"
+path = "src/main.rs"

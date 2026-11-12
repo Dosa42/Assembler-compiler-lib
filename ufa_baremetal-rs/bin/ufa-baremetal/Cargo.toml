@@ -1,0 +1,16 @@
+[package]
+name = "ufa-baremetal"
+description = "K01-K06 invariant-check CLI for emitted AArch64 assembly"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "ufa-baremetal"
+path = "src/main.rs"
+
+[dependencies]
+ufa_baremetal_core = { path = "../../lib/ufa_baremetal_core" }
+uagl_aarch64_assembler = { path = "../../lib/uagl_aarch64_assembler" }
