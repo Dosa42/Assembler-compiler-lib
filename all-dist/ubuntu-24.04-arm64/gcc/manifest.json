@@ -1,0 +1,23 @@
+{
+  "component": "gcc",
+  "platform": "ubuntu-24.04-arm64",
+  "artifact_id": 13919392794,
+  "artifact_created_at": "2026-11-12T05:59:00Z",
+  "artifact_digest": "sha256:e85253397e7fe1fb8b3e2233f02b23e362d6dcf628c7ecdc8895c0c25919a32e",
+  "run_id": 43163341859,
+  "run_url": "https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43163341859",
+  "source_commit": "6765e7b071215c4bd3577ad41fb7b008cc5a6be4",
+  "archive": {
+    "name": "gcc-ubuntu-24.04-arm64.tar.xz",
+    "size": 79029668,
+    "sha256": "755d91f6f3766855415679784a85ce4860871549a51d3fa2d19dff3b7e0692a5"
+  },
+  "files": [
+    {
+      "name": "gcc-ubuntu-24.04-arm64.tar.xz",
+      "size": 79029668,
+      "sha256": "755d91f6f3766855415679784a85ce4860871549a51d3fa2d19dff3b7e0692a5"
+    }
+  ],
+  "stored_at": "2026-11-12T07:48:27.383495+00:00"
+}

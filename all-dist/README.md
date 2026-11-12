@@ -5,6 +5,7 @@ Source-built installation archives committed to this repository. Each archive co
 | Component | Platform | Build run | Files |
 | --- | --- | --- | --- |
 | [binutils](ubuntu-24.04-arm64/binutils/README.md) | ubuntu-24.04-arm64 | [43163341859](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43163341859) | [binutils-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/binutils/binutils-ubuntu-24.04-arm64.tar.xz) |
+| [gcc](ubuntu-24.04-arm64/gcc/README.md) | ubuntu-24.04-arm64 | [43163341859](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43163341859) | [gcc-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/gcc/gcc-ubuntu-24.04-arm64.tar.xz) |
 
 ## Download and restore
 
