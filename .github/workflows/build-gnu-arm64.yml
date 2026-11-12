@@ -4,8 +4,14 @@ on:
   push:
     branches: [main]
     paths:
-      - .github/workflows/build-gnu-arm64.yml
       - sources/**
+  workflow_call:
+    inputs:
+      component:
+        description: Component to build
+        type: string
+        default: all
+        required: false
   workflow_dispatch:
     inputs:
       component:
@@ -142,7 +148,14 @@ jobs:
           elif component == 'glibc':
               prefix = Path('/usr')
               installed = stage / 'usr'
-              configure(work, source, ['--prefix=/usr', '--libdir=/usr/lib', '--build=' + host, '--host=' + host, '--disable-werror', '--with-headers=/usr/include'])
+              kernel_headers = work / 'kernel-headers'
+              kernel_headers.mkdir()
+              for name in ['linux', 'asm-generic', 'mtd', 'rdma', 'scsi', 'sound', 'video', 'xen']:
+                  header = Path('/usr/include') / name
+                  if header.exists():
+                      (kernel_headers / name).symlink_to(header, target_is_directory=True)
+              (kernel_headers / 'asm').symlink_to(Path('/usr/include') / host / 'asm', target_is_directory=True)
+              configure(work, source, ['--prefix=/usr', '--libdir=/usr/lib', '--build=' + host, '--host=' + host, '--disable-werror', '--with-headers=' + str(kernel_headers)])
               run('compile', ['make', '-j' + jobs])
               run('install', ['make', 'install_root=' + str(stage), 'install'])
           elif component == 'newlib':
