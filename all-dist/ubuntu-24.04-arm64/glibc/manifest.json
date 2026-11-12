@@ -1,0 +1,23 @@
+{
+  "component": "glibc",
+  "platform": "ubuntu-24.04-arm64",
+  "artifact_id": 13918464402,
+  "artifact_created_at": "2026-11-12T05:52:19Z",
+  "artifact_digest": "sha256:34620482d6701defef1f20635e755249b54d9bc3e24812f8e32d7d6a4bb8f873",
+  "run_id": 43163744598,
+  "run_url": "https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43163744598",
+  "source_commit": "c960ee3bfe305dfebd2c3f284ddd55c5e1ae5bc1",
+  "archive": {
+    "name": "glibc-ubuntu-24.04-arm64.tar.xz",
+    "size": 11082312,
+    "sha256": "c84ab3f053df17256abc416009750cc6d16de1da48dcfbef468d2b5a0c599429"
+  },
+  "files": [
+    {
+      "name": "glibc-ubuntu-24.04-arm64.tar.xz",
+      "size": 11082312,
+      "sha256": "c84ab3f053df17256abc416009750cc6d16de1da48dcfbef468d2b5a0c599429"
+    }
+  ],
+  "stored_at": "2026-11-12T07:48:53.196520+00:00"
+}
