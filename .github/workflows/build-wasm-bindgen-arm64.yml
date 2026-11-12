@@ -1,0 +1,45 @@
+name: Build browser bindings ARM64
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build-wasm-bindgen-arm64.yml
+      - .github/scripts/build-wasm-bindgen.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            .github/scripts/build-wasm-bindgen.py
+            all-dist/restore.py
+          sparse-checkout-cone-mode: false
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential pkg-config libssl-dev nodejs xz-utils
+      - name: Build and execute browser bindings
+        run: python3 .github/scripts/build-wasm-bindgen.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wasm-bindgen-ubuntu-24.04-arm64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+  publish:
+    needs: build
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/publish-all-dist.yml
+    with:
+      component: wasm-bindgen
+      run_id: ${{ format('{0}', github.run_id) }}
