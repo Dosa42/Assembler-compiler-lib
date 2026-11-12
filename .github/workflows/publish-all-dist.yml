@@ -12,6 +12,7 @@ on:
       - Build GNU ARM64 executables
       - Build LLVM and Zig ARM64 executables
       - Rebuild selected GNU components
+      - Build Rust and WebAssembly ARM64 executables
     branches: [main]
     types: [completed]
   workflow_dispatch:
