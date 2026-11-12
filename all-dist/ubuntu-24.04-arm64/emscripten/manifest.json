@@ -1,0 +1,33 @@
+{
+  "component": "emscripten",
+  "platform": "ubuntu-24.04-arm64",
+  "artifact_id": 13927145037,
+  "artifact_created_at": "2026-11-12T08:15:35Z",
+  "artifact_digest": "sha256:83afdf44dffaf079adf8ff2afac469ee60931ccd47c2faa39add804581ced64b",
+  "run_id": 43179370823,
+  "run_url": "https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43179370823",
+  "source_commit": "24ea2a565e23022343bb4ed7de2a75d4341064b6",
+  "archive": {
+    "name": "emscripten-ubuntu-24.04-arm64.tar.xz",
+    "size": 271073880,
+    "sha256": "e2dc8b5f98804507052a2204ef0e72d358987f0c78714c82c2d66b1e5bc4508b"
+  },
+  "files": [
+    {
+      "name": "emscripten-ubuntu-24.04-arm64.tar.xz.part0001",
+      "size": 99614720,
+      "sha256": "9b023d6396482e8a8aeeb48f7a613cd7b4d79de12d8720a1768a33ac24acb03f"
+    },
+    {
+      "name": "emscripten-ubuntu-24.04-arm64.tar.xz.part0002",
+      "size": 99614720,
+      "sha256": "aab80bf682c7d62f1e2d6596daaca67cae96251a65e844dca795278a1de7ccf5"
+    },
+    {
+      "name": "emscripten-ubuntu-24.04-arm64.tar.xz.part0003",
+      "size": 71844440,
+      "sha256": "a7ce66f93243401963a460c09f4bb4772893c78997f4e0c440a12cf18f4cee34"
+    }
+  ],
+  "stored_at": "2026-11-12T08:29:22.908719+00:00"
+}
