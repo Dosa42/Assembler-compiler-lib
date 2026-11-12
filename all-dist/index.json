@@ -352,6 +352,34 @@
         }
       ],
       "stored_at": "2026-11-12T11:13:17.894061+00:00"
+    },
+    "wasi-sdk": {
+      "component": "wasi-sdk",
+      "platform": "ubuntu-24.04-arm64",
+      "artifact_id": 13946302666,
+      "artifact_created_at": "2026-11-12T12:55:18Z",
+      "artifact_digest": "sha256:9e1e6c906f0aa69f70b252fba5519e54f251696530d3c953085d586c09d62470",
+      "run_id": 43206784386,
+      "run_url": "https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43206784386",
+      "source_commit": "6b829d52891963f122bec845342910cbfbc9cbe3",
+      "archive": {
+        "name": "wasi-sdk-ubuntu-24.04-arm64.tar.xz",
+        "size": 180029320,
+        "sha256": "48bce07a2740b379ca04d76b7edb47f4ca70c2b3fb781cf3364b3b5414787834"
+      },
+      "files": [
+        {
+          "name": "wasi-sdk-ubuntu-24.04-arm64.tar.xz.part0001",
+          "size": 99614720,
+          "sha256": "bebb15dacd0b3d179bbea8310d17ac15b468e0e06729a18462a455fd5144c327"
+        },
+        {
+          "name": "wasi-sdk-ubuntu-24.04-arm64.tar.xz.part0002",
+          "size": 80414600,
+          "sha256": "f2a70cd332a2e324970f4f4d3957eb98d4ec548d4d5c296f8efd7f032d92b374"
+        }
+      ],
+      "stored_at": "2026-11-12T12:56:59.290008+00:00"
     }
   }
 }
