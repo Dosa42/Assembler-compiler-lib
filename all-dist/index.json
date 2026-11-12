@@ -138,6 +138,29 @@
         }
       ],
       "stored_at": "2026-11-12T07:49:07.083436+00:00"
+    },
+    "binaryen": {
+      "component": "binaryen",
+      "platform": "ubuntu-24.04-arm64",
+      "artifact_id": 13925519236,
+      "artifact_created_at": "2026-11-12T08:13:08Z",
+      "artifact_digest": "sha256:43ae2535eec216b12dd7deb63fb3bbd73f1b3f1bed76c905e66074479d03c553",
+      "run_id": 43179370823,
+      "run_url": "https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43179370823",
+      "source_commit": "24ea2a565e23022343bb4ed7de2a75d4341064b6",
+      "archive": {
+        "name": "binaryen-ubuntu-24.04-arm64.tar.xz",
+        "size": 4682260,
+        "sha256": "f4f510d748ecc71b943062c2eaed090058f4f36026dd79a02855e195204d1b5e"
+      },
+      "files": [
+        {
+          "name": "binaryen-ubuntu-24.04-arm64.tar.xz",
+          "size": 4682260,
+          "sha256": "f4f510d748ecc71b943062c2eaed090058f4f36026dd79a02855e195204d1b5e"
+        }
+      ],
+      "stored_at": "2026-11-12T08:29:08.819152+00:00"
     }
   }
 }

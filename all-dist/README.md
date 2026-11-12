@@ -4,6 +4,7 @@ Source-built installation archives committed to this repository. Each archive co
 
 | Component | Platform | Build run | Files |
 | --- | --- | --- | --- |
+| [binaryen](ubuntu-24.04-arm64/binaryen/README.md) | ubuntu-24.04-arm64 | [43179370823](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43179370823) | [binaryen-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/binaryen/binaryen-ubuntu-24.04-arm64.tar.xz) |
 | [binutils](ubuntu-24.04-arm64/binutils/README.md) | ubuntu-24.04-arm64 | [43163341859](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43163341859) | [binutils-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/binutils/binutils-ubuntu-24.04-arm64.tar.xz) |
 | [gcc](ubuntu-24.04-arm64/gcc/README.md) | ubuntu-24.04-arm64 | [43163341859](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43163341859) | [gcc-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/gcc/gcc-ubuntu-24.04-arm64.tar.xz) |
 | [gdb](ubuntu-24.04-arm64/gdb/README.md) | ubuntu-24.04-arm64 | [43163341859](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43163341859) | [gdb-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/gdb/gdb-ubuntu-24.04-arm64.tar.xz) |
