@@ -1,0 +1,23 @@
+{
+  "component": "newlib",
+  "platform": "ubuntu-24.04-arm64",
+  "artifact_id": 13918554787,
+  "artifact_created_at": "2026-11-12T05:56:20Z",
+  "artifact_digest": "sha256:829fda71d402bf15199685db010b65bfbb649f433c7ac3b2571806663a42dd17",
+  "run_id": 43163341859,
+  "run_url": "https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43163341859",
+  "source_commit": "6765e7b071215c4bd3577ad41fb7b008cc5a6be4",
+  "archive": {
+    "name": "newlib-ubuntu-24.04-arm64.tar.xz",
+    "size": 528896,
+    "sha256": "d9ad3d092cbca67823f54c7dd106bf90634dc9c9715a07df4f3121a109accdda"
+  },
+  "files": [
+    {
+      "name": "newlib-ubuntu-24.04-arm64.tar.xz",
+      "size": 528896,
+      "sha256": "d9ad3d092cbca67823f54c7dd106bf90634dc9c9715a07df4f3121a109accdda"
+    }
+  ],
+  "stored_at": "2026-11-12T07:48:59.581389+00:00"
+}
