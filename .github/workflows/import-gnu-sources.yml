@@ -1,0 +1,114 @@
+name: Import GNU source repositories
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/import-gnu-sources.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: import-gnu-sources-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  import:
+    name: Clone GNU sources on native ARM64 Ubuntu
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out destination repository
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Check whether sources are already imported
+        id: sources
+        run: |
+          if test -f sources/upstreams.json; then
+            echo 'imported=true' >> "$GITHUB_OUTPUT"
+            cat sources/upstreams.json
+          else
+            echo 'imported=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install GCC and AArch64 GNU/Linux compiler
+        if: steps.sources.outputs.imported != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y git gcc g++ gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3
+          test "$(uname -m)" = aarch64
+          gcc --version
+          aarch64-linux-gnu-gcc --version
+
+      - name: Clone official upstream repositories and export their sources
+        if: steps.sources.outputs.imported != 'true'
+        run: |
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          repositories = [
+              ('gcc', 'https://gcc.gnu.org/git/gcc.git', ['GCC C/C++']),
+              ('binutils-gdb', 'https://sourceware.org/git/binutils-gdb.git', ['Binutils', 'GDB']),
+              ('newlib-cygwin', 'https://sourceware.org/git/newlib-cygwin.git', ['Newlib']),
+              ('glibc', 'https://sourceware.org/git/glibc.git', ['Glibc']),
+          ]
+          workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          scratch = pathlib.Path(os.environ['RUNNER_TEMP']) / 'gnu-source-import'
+          scratch.mkdir(parents=True, exist_ok=True)
+          records = []
+          for name, url, components in repositories:
+              clone = scratch / name
+              destination = workspace / 'sources' / name
+              destination.mkdir(parents=True, exist_ok=False)
+              subprocess.run(['git', 'clone', '--depth=1', '--single-branch', url, str(clone)], check=True)
+              commit = subprocess.check_output(['git', '-C', str(clone), 'rev-parse', 'HEAD'], text=True).strip()
+              branch = subprocess.check_output(['git', '-C', str(clone), 'symbolic-ref', '--short', 'HEAD'], text=True).strip()
+              archive = subprocess.Popen(['git', '-C', str(clone), 'archive', 'HEAD'], stdout=subprocess.PIPE)
+              try:
+                  extraction = subprocess.run(['tar', '-xf', '-', '-C', str(destination)], stdin=archive.stdout)
+              finally:
+                  archive.stdout.close()
+              archive_status = archive.wait()
+              extraction.check_returncode()
+              if archive_status:
+                  raise subprocess.CalledProcessError(archive_status, archive.args)
+              records.append({'path': 'sources/' + name, 'url': url, 'branch': branch, 'commit': commit, 'components': components})
+              print(name + ': ' + commit, flush=True)
+          manifest = {'imported_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'repositories': records}
+          (workspace / 'sources' / 'upstreams.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+          PY
+
+      - name: Commit and push imported source trees
+        if: steps.sources.outputs.imported != 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add --force -- sources/
+          git commit -m 'Import official GCC, Binutils, GDB, Newlib and Glibc sources'
+          git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
+
+      - name: Report imported source revisions
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path('sources/upstreams.json').read_text(encoding='utf-8'))
+          lines = ['Imported GNU source repositories', '', '| Components | Directory | Upstream commit |', '| --- | --- | --- |']
+          for item in manifest['repositories']:
+              lines.append('| ' + ', '.join(item['components']) + ' | `' + item['path'] + '` | `' + item['commit'] + '` |')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write('\n'.join(lines) + '\n')
+          PY
