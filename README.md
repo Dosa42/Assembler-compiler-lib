@@ -27,7 +27,11 @@ For LLVM and Zig, open [Build LLVM and Zig ARM64 executables](https://github.com
 
 The workflows also build changes to their source directories pushed to `main`. Both support `workflow_call`.
 
-Each successful component uploads an artifact containing an installation archive and its SHA-256 checksum:
+Each successful component uploads an artifact containing an installation archive and its SHA-256 checksum. The [distribution publisher](.github/workflows/publish-all-dist.yml) also saves the built outputs permanently under [all-dist/ubuntu-24.04-arm64](all-dist/README.md), in one directory per component. It backfills existing verified artifacts and runs automatically when a GNU or LLVM/Zig build finishes. It can also be run manually or reused with workflow_call.
+
+Each component directory contains its executable/library installation archive, SHA-256 checksums, a manifest linking the original build and source commit, and download/extraction instructions. Files larger than 95 MiB are split into numbered parts to fit GitHub's per-file limit. [all-dist/restore.py](all-dist/restore.py) downloads, verifies and joins them automatically.
+
+Available build outputs:
 
 | Component | Artifact | Contents |
 | --- | --- | --- |
@@ -39,13 +43,13 @@ Each successful component uploads an artifact containing an installation archive
 | LLVM | `llvm-ubuntu-24.04-arm64` | LLVM tools, Clang, LLD, LLDB, clangd, clang-tidy, clang-format and development libraries; all default LLVM target backends |
 | Zig | `zig-ubuntu-24.04-arm64` | Source-built stage3 Zig compiler, standard library and bundled LLVM 23 runtime dependencies |
 
-Build logs are uploaded separately, including on failure. Installation artifacts are retained for 30 days and logs for 14 days.
+Build logs are uploaded separately, including on failure. GitHub Actions artifact copies are retained for 30 days and logs for 14 days. The installation packages committed under all-dist remain in the repository.
 
 ## Use the executables
 
 The executables run on ARM64 GNU/Linux. The build host is `ubuntu-24.04-arm`, and the Linux target is `aarch64-linux-gnu`. Ubuntu provides `gcc` and `aarch64-linux-gnu-gcc` to build the imported sources.
 
-Download the artifact ZIPs from a completed run and unpack the ZIPs. Extract the GCC, Binutils and GDB installation archives into the same directory:
+Download the installation archives from [all-dist](all-dist/README.md), or download and unpack the artifact ZIPs from a completed run. Extract the GCC, Binutils and GDB installation archives into the same directory:
 
 ```sh
 mkdir -p "$HOME/gnu-arm64"
