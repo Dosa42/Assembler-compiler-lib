@@ -1,10 +1,6 @@
 name: Import Rust and WebAssembly source repositories
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/import-rust-wasm.yml
   workflow_dispatch:
 
 permissions:
