@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
     paths:
-      - .github/workflows/build-rust-wasm-arm64.yml
-      - .github/scripts/build-rust-wasm.py
       - sources/rust/**
       - sources/rustup/**
       - sources/wasm-tools/**
