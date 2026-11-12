@@ -1,0 +1,70 @@
+if(BUILD_FUZZTEST)
+  include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/third_party/fuzztest)
+else()
+  include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/third_party/googletest/googletest/include)
+  include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/third_party/googletest/googlemock/include)
+endif()
+
+set(unittest_SOURCES
+  abstract.cpp
+  arena.cpp
+  cast-check.cpp
+  cfg.cpp
+  constraint.cpp
+  dataflow.cpp
+  delta_debugging.cpp
+  dfa_minimization.cpp
+  disjoint_sets.cpp
+  dwarf-ranges.cpp
+  effects.cpp
+  glbs.cpp
+  graph.cpp
+  inplace_vector.cpp
+  int128.cpp
+  interpreter.cpp
+  intervals.cpp
+  istring.cpp
+  js-embedded-module.cpp
+  json.cpp
+  lattices.cpp
+  leaves.cpp
+  local-graph.cpp
+  module-utils.cpp
+  possible-contents.cpp
+  principal-type.cpp
+  printing.cpp
+  public-type-validator.cpp
+  scc.cpp
+  sizes.cpp
+  source-map.cpp
+  span.cpp
+  stringify.cpp
+  subtype-exprs.cpp
+  suffix_tree.cpp
+  topological-sort.cpp
+  type-builder.cpp
+  type-updating.cpp
+  validator.cpp
+  wat-lexer.cpp
+  wto.cpp
+)
+
+if(BUILD_FUZZTEST)
+  set(unittest_SOURCES ${unittest_SOURCES} type-domains.cpp)
+endif()
+
+# suffix_tree.cpp includes LLVM header using std::iterator (deprecated in C++17)
+if (NOT MSVC)
+  set_source_files_properties(suffix_tree.cpp PROPERTIES COMPILE_FLAGS -Wno-deprecated-declarations)
+endif()
+
+enable_testing()
+include(GoogleTest)
+binaryen_add_executable(binaryen-unittests "${unittest_SOURCES}")
+if(BUILD_FUZZTEST)
+  link_fuzztest(binaryen-unittests)
+  target_link_libraries(binaryen-unittests PRIVATE gmock)
+  gtest_discover_tests(binaryen-unittests)
+else()
+  target_link_libraries(binaryen-unittests PRIVATE gtest gtest_main gmock)
+endif()

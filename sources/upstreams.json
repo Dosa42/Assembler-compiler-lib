@@ -365,7 +365,56 @@
       ],
       "imported_at": "2026-11-12T07:33:30.053036+00:00",
       "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
+    },
+    {
+      "upstream_tree": "5e10a81c7e3982392eb153ca2c619ee628102d90",
+      "tree": "30b501c69113abdd3c8237bba8ef8208afc01cd0",
+      "file_count": 4421,
+      "submodules": [
+        {
+          "path": "test/spec/testsuite",
+          "url": "https://github.com/WebAssembly/testsuite.git",
+          "commit": "4b24564c844e3d34bf46dfcb3c774ee5163e31cc",
+          "upstream_tree": "76e36b1225d2d6088abd660c8b039d74549d2c15",
+          "tree": "76e36b1225d2d6088abd660c8b039d74549d2c15",
+          "file_count": 278
+        },
+        {
+          "path": "third_party/fuzztest",
+          "url": "https://github.com/google/fuzztest",
+          "commit": "5bbbddfc241c8c87902d4a80cda5697dd8c20199",
+          "upstream_tree": "68cfa401d15ff1c21ef35d61abe9aef37c34dd0d",
+          "tree": "68cfa401d15ff1c21ef35d61abe9aef37c34dd0d",
+          "file_count": 478
+        },
+        {
+          "path": "third_party/googletest",
+          "url": "https://github.com/google/googletest.git",
+          "commit": "e2239ee6043f73722e7aa812a459f54a28552929",
+          "upstream_tree": "8cf1e36614fc6ca89eb70fa2aeaad0b4ebf0c34a",
+          "tree": "8cf1e36614fc6ca89eb70fa2aeaad0b4ebf0c34a",
+          "file_count": 259
+        },
+        {
+          "path": "third_party/mimalloc",
+          "url": "https://github.com/microsoft/mimalloc.git",
+          "commit": "fbd8b99c2b828428947d70fdc046bb55609be93e",
+          "upstream_tree": "94efd375175e501c561e68d1dd8523f56eded5a9",
+          "tree": "94efd375175e501c561e68d1dd8523f56eded5a9",
+          "file_count": 304
+        }
+      ],
+      "path": "sources/binaryen",
+      "url": "https://github.com/WebAssembly/binaryen.git",
+      "branch": "main",
+      "commit": "a9fd4c7fe8f6045f9a39a3cc5b1478e48c0345e3",
+      "components": [
+        "Binaryen",
+        "wasm-opt"
+      ],
+      "imported_at": "2026-11-12T07:33:49.977818+00:00",
+      "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
     }
   ],
-  "updated_at": "2026-11-12T07:33:30.053052+00:00"
+  "updated_at": "2026-11-12T07:33:49.977833+00:00"
 }
