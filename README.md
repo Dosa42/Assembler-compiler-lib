@@ -7,8 +7,17 @@ Build the imported GNU, LLVM/Clang and Zig source trees into executables and lib
 - GNU: [GCC](sources/gcc), [Binutils/GDB](sources/binutils-gdb), [Newlib](sources/newlib-cygwin) and [Glibc](sources/glibc).
 - [LLVM monorepo](sources/llvm-project): complete source tree, including Clang, LLD, LLDB, MLIR, Flang and the runtime libraries.
 - [Zig](sources/zig): complete source tree imported from the project's repository on Codeberg.
+- [Rust](sources/rust): compiler, standard library, Cargo, Clippy, rustfmt and the pinned upstream submodule sources.
+- [rustup](sources/rustup): Rust toolchain installer and manager.
+- WebAssembly: [wasm-tools](sources/wasm-tools), [WABT](sources/wabt), [Binaryen](sources/binaryen), [WASI SDK](sources/wasi-sdk), [Emscripten](sources/emscripten) and [emsdk](sources/emsdk).
 
-Exact upstream URLs, branches, commits and the LLVM/Zig tree verification results are recorded in [sources/upstreams.json](sources/upstreams.json).
+Exact upstream URLs, branches, commits and source verification results are recorded in [sources/upstreams.json](sources/upstreams.json).
+
+Rust and WebAssembly sources were imported on a GitHub-hosted `ubuntu-24.04-arm` runner, including their recursively pinned Git submodules. Each submodule is expanded into ordinary tracked source files at its original path. Every original file blob, executable mode and symlink is preserved. The manifest records both the upstream root tree and the expanded imported tree, with each submodule's URL, commit and verified tree. Rust's compiler-specific LLVM fork and WASI SDK's LLVM dependency retain their own required revisions.
+
+The executable workflows currently cover GNU, LLVM and Zig. Rust, rustup and WebAssembly sources are ready for subsequent builds.
+
+The [successful source-import run](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43176726173) is retained as execution evidence. The [Rust/WebAssembly import workflow](.github/workflows/import-rust-wasm.yml) remains available through **Run workflow** as a reusable template. It skips already imported sources after checking their tree hashes. For WASI SDK's GNU config dependency, the pinned commit was retrieved from a GitHub mirror after Savannah returned HTTP 500; the manifest retains the upstream URL and records the fetch URL.
 
 ## Build and download
 
