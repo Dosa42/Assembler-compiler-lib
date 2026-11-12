@@ -1,0 +1,23 @@
+{
+  "component": "rustup",
+  "platform": "ubuntu-24.04-arm64",
+  "artifact_id": 13925642826,
+  "artifact_created_at": "2026-11-12T08:04:19Z",
+  "artifact_digest": "sha256:9cadd11bb51fd34877b7a91a57ca22edb0a45a84ba549b30860d8e7e7bfebe9f",
+  "run_id": 43179370823,
+  "run_url": "https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43179370823",
+  "source_commit": "24ea2a565e23022343bb4ed7de2a75d4341064b6",
+  "archive": {
+    "name": "rustup-ubuntu-24.04-arm64.tar.xz",
+    "size": 8069100,
+    "sha256": "989d47565d100437c6f5be16609aaefa880cb6ff0cb614f7b9ef36a16ccd2093"
+  },
+  "files": [
+    {
+      "name": "rustup-ubuntu-24.04-arm64.tar.xz",
+      "size": 8069100,
+      "sha256": "989d47565d100437c6f5be16609aaefa880cb6ff0cb614f7b9ef36a16ccd2093"
+    }
+  ],
+  "stored_at": "2026-11-12T08:30:29.282922+00:00"
+}
