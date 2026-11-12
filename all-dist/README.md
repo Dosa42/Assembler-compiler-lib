@@ -9,6 +9,7 @@ Source-built installation archives committed to this repository. Each archive co
 | [gdb](ubuntu-24.04-arm64/gdb/README.md) | ubuntu-24.04-arm64 | [43163341859](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43163341859) | [gdb-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/gdb/gdb-ubuntu-24.04-arm64.tar.xz) |
 | [glibc](ubuntu-24.04-arm64/glibc/README.md) | ubuntu-24.04-arm64 | [43163744598](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43163744598) | [glibc-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/glibc/glibc-ubuntu-24.04-arm64.tar.xz) |
 | [newlib](ubuntu-24.04-arm64/newlib/README.md) | ubuntu-24.04-arm64 | [43163341859](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43163341859) | [newlib-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/newlib/newlib-ubuntu-24.04-arm64.tar.xz) |
+| [zig](ubuntu-24.04-arm64/zig/README.md) | ubuntu-24.04-arm64 | [43168282553](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43168282553) | [zig-ubuntu-24.04-arm64.tar.xz](ubuntu-24.04-arm64/zig/zig-ubuntu-24.04-arm64.tar.xz) |
 
 ## Download and restore
 
