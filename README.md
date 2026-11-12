@@ -2,6 +2,14 @@
 
 Build the imported GNU source trees into executables and libraries on GitHub-hosted Ubuntu 24.04 ARM64 runners.
 
+## Imported sources
+
+- GNU: [GCC](sources/gcc), [Binutils/GDB](sources/binutils-gdb), [Newlib](sources/newlib-cygwin) and [Glibc](sources/glibc).
+- [LLVM monorepo](sources/llvm-project): complete source tree, including Clang, LLD, LLDB, MLIR, Flang and the runtime libraries.
+- [Zig](sources/zig): complete source tree imported from the project's repository on Codeberg.
+
+Exact upstream URLs, branches, commits and the LLVM/Zig tree verification results are recorded in [sources/upstreams.json](sources/upstreams.json).
+
 ## Build and download
 
 Open [Build GNU ARM64 executables](https://github.com/Dosa42/Assembler-compiler-lib/actions/workflows/build-gnu-arm64.yml), choose **Run workflow**, and select `all` or one component.
