@@ -1,6 +1,6 @@
 # Assembler-compiler-lib
 
-Build the imported GNU source trees into executables and libraries on GitHub-hosted Ubuntu 24.04 ARM64 runners.
+Build the imported GNU, LLVM/Clang and Zig source trees into executables and libraries on GitHub-hosted Ubuntu 24.04 ARM64 runners.
 
 ## Imported sources
 
@@ -14,7 +14,9 @@ Exact upstream URLs, branches, commits and the LLVM/Zig tree verification result
 
 Open [Build GNU ARM64 executables](https://github.com/Dosa42/Assembler-compiler-lib/actions/workflows/build-gnu-arm64.yml), choose **Run workflow**, and select `all` or one component.
 
-The workflow also builds imported source changes pushed to `main`. It can be called from another workflow with `workflow_call`.
+For LLVM and Zig, open [Build LLVM and Zig ARM64 executables](https://github.com/Dosa42/Assembler-compiler-lib/actions/workflows/build-llvm-zig-arm64.yml) and select `all`, `llvm` or `zig`.
+
+The workflows also build changes to their source directories pushed to `main`. Both support `workflow_call`.
 
 Each successful component uploads an artifact containing an installation archive and its SHA-256 checksum:
 
@@ -25,6 +27,8 @@ Each successful component uploads an artifact containing an installation archive
 | GDB | `gdb-ubuntu-24.04-arm64` | GDB and gdbserver |
 | Newlib | `newlib-ubuntu-24.04-arm64` | Headers and static libraries for `aarch64-none-elf` |
 | Glibc | `glibc-ubuntu-24.04-arm64` | ARM64 Linux C library, dynamic loader, headers and utilities |
+| LLVM | `llvm-ubuntu-24.04-arm64` | LLVM tools, Clang, LLD, LLDB, clangd, clang-tidy, clang-format and development libraries; all default LLVM target backends |
+| Zig | `zig-ubuntu-24.04-arm64` | Source-built stage3 Zig compiler, standard library and bundled LLVM 23 runtime dependencies |
 
 Build logs are uploaded separately, including on failure. Installation artifacts are retained for 30 days and logs for 14 days.
 
@@ -48,7 +52,20 @@ aarch64-linux-gnu-as --version
 gdb --version
 ```
 
+Extract LLVM and Zig into the same installation root:
+
+```sh
+tar -xJf llvm-ubuntu-24.04-arm64.tar.xz -C "$HOME/gnu-arm64"
+tar -xJf zig-ubuntu-24.04-arm64.tar.xz -C "$HOME/gnu-arm64"
+export PATH="$HOME/gnu-arm64/opt/llvm/bin:$HOME/gnu-arm64/opt/zig/bin:$PATH"
+clang --version
+lldb --version
+zig version
+```
+
 These are dynamic executables and use the corresponding Ubuntu runtime libraries. Glibc's archive contains a separate sysroot. Newlib's archive is for bare-metal AArch64 development.
+
+The LLVM build enables `clang;clang-tools-extra;lld;lldb` and every default LLVM target backend. The imported LLVM source is version 24. Zig's imported source requires LLVM 23 development libraries, which the GitHub build obtains from the official apt.llvm.org repository. Zig itself is bootstrapped and compiled from the imported source. Its runtime dependency libraries are bundled with relative runtime paths.
 
 ## Verification and provenance
 
@@ -59,12 +76,14 @@ Every successful artifact has passed a component-specific check:
 - GDB starts a debuggee, hits a breakpoint and evaluates an expression.
 - Newlib links a bare-metal AArch64 ELF against its newly built libc.
 - Glibc runs an executable with its newly built dynamic loader and libc.
+- LLVM/Clang compile and execute C and C++; LLVM IR passes through the assembler, optimizer, code generator and archiver into an executed program. LLDB debugs a program and executes Python.
+- Zig compiles and executes Zig, C and C++, runs Zig tests with its LLVM backend, and cross-compiles an x86_64 ELF object.
 
-The archives include a build report, upstream commit manifest, source location and license files under `share/gnu-build` inside the component's installation prefix.
+The archives include a build report, upstream commit manifest, source location and license files inside the component's installation prefix: `share/gnu-build` for GNU, and `share/build-info` for LLVM and Zig.
 
 The source revisions are pinned in [sources/upstreams.json](sources/upstreams.json). Binutils and GDB share the imported `sources/binutils-gdb` tree.
 
-## Reuse the build workflow
+## Reuse the build workflows
 
 ```yaml
 name: Build GCC
@@ -79,3 +98,5 @@ jobs:
 ```
 
 GCC is built with C and C++, without multilib or a three-stage bootstrap. The workflow runs the checks listed above; complete upstream regression suites are separate.
+
+For LLVM or Zig, call `./.github/workflows/build-llvm-zig-arm64.yml` with `component: llvm`, `component: zig` or `component: all`.
