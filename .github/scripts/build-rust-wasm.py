@@ -48,51 +48,53 @@ wat = smoke / 'answer.wat'
 wat.write_text('(module (func (export "answer") (result i32) i32.const 42))\n')
 
 if component == 'rust':
-    manifest = json.loads((root / 'sources/upstreams.json').read_text())
-    upstream = next(item for item in manifest['repositories'] if item['path'] == 'sources/rust')
-    url = 'https://api.github.com/repos/rust-lang/rust/git/commits/' + upstream['commit']
-    with urllib.request.urlopen(url) as response:
-        commit = json.load(response)
-    date = commit['committer']['date'][:10]
-    (source / 'git-commit-info').write_text(upstream['commit'] + '\n' + upstream['commit'][:9] + '\n' + date + '\n')
-    (source / 'git-commit-hash').write_text(upstream['commit'] + '\n')
-    configuration = '\n'.join([
-        'profile = "dist"',
-        'change-id = "ignore"',
-        '[build]',
-        'build-dir = ' + json.dumps(str(work / 'bootstrap')),
-        'build-stage = 2',
-        'install-stage = 2',
-        'host = ["aarch64-unknown-linux-gnu"]',
-        'target = ["aarch64-unknown-linux-gnu", "wasm32-unknown-unknown"]',
-        'submodules = false',
-        'docs = false',
-        'extended = true',
-        'tools = ["cargo", "clippy", "rustfmt"]',
-        'locked-deps = true',
-        '[llvm]',
-        'download-ci-llvm = false',
-        'ninja = true',
-        'link-jobs = 1',
-        'use-linker = "lld"',
-        '[rust]',
-        'channel = "nightly"',
-        'download-rustc = false',
-        'debuginfo-level = 0',
-        '[install]',
-        'prefix = "/opt/rust"',
-        'sysconfdir = "etc"',
-        '[target.aarch64-unknown-linux-gnu]',
-        'cc = "clang"',
-        'cxx = "clang++"',
-        'linker = "clang"',
-        '',
-    ])
-    configuration_path = work / 'bootstrap.toml'
-    configuration_path.write_text(configuration)
-    command = ['python3', source / 'x.py', '--config', configuration_path]
-    run('compile-stage2', [*command, 'build', '--stage', '2', '-j', '3', 'compiler/rustc', 'library/std', 'src/tools/cargo', 'src/tools/clippy', 'src/tools/rustfmt'])
-    run('install-stage2', [*command, 'install', '--stage', '2', '-j', '3'], env=dict(environment, DESTDIR=str(stage)))
+    if os.environ.get('RECOVER_STAGE') != '1':
+        manifest = json.loads((root / 'sources/upstreams.json').read_text())
+        upstream = next(item for item in manifest['repositories'] if item['path'] == 'sources/rust')
+        url = 'https://api.github.com/repos/rust-lang/rust/git/commits/' + upstream['commit']
+        with urllib.request.urlopen(url) as response:
+            commit = json.load(response)
+        date = commit['committer']['date'][:10]
+        (source / 'git-commit-info').write_text(upstream['commit'] + '\n' + upstream['commit'][:9] + '\n' + date + '\n')
+        (source / 'git-commit-hash').write_text(upstream['commit'] + '\n')
+        configuration = '\n'.join([
+            'profile = "dist"',
+            'change-id = "ignore"',
+            '[build]',
+            'build-dir = ' + json.dumps(str(work / 'bootstrap')),
+            'build-stage = 2',
+            'install-stage = 2',
+            'host = ["aarch64-unknown-linux-gnu"]',
+            'target = ["aarch64-unknown-linux-gnu", "wasm32-unknown-unknown"]',
+            'submodules = false',
+            'docs = false',
+            'extended = true',
+            'tools = ["cargo", "clippy", "rustfmt"]',
+            'locked-deps = true',
+            '[llvm]',
+            'download-ci-llvm = false',
+            'ninja = true',
+            'link-jobs = 1',
+            'use-linker = "lld"',
+            '[rust]',
+            'channel = "nightly"',
+            'download-rustc = false',
+            'lld = true',
+            'debuginfo-level = 0',
+            '[install]',
+            'prefix = "/opt/rust"',
+            'sysconfdir = "etc"',
+            '[target.aarch64-unknown-linux-gnu]',
+            'cc = "clang"',
+            'cxx = "clang++"',
+            'linker = "clang"',
+            '',
+        ])
+        configuration_path = work / 'bootstrap.toml'
+        configuration_path.write_text(configuration)
+        command = ['python3', source / 'x.py', '--config', configuration_path]
+        run('compile-stage2', [*command, 'build', '--stage', '2', '-j', '3', 'compiler/rustc', 'library/std', 'src/tools/cargo', 'src/tools/clippy', 'src/tools/rustfmt'])
+        run('install-stage2', [*command, 'install', '--stage', '2', '-j', '3'], env=dict(environment, DESTDIR=str(stage)))
     compiler = prefix / 'bin/rustc'
     run('rustc-version', [compiler, '--version', '--verbose'], cwd=smoke)
     native = smoke / 'native.rs'
@@ -147,6 +149,19 @@ elif component == 'binaryen':
     assert 'answer' in run('disassemble', [prefix / 'bin/wasm-dis', smoke / 'answer.wasm'])
     checks.append('Source-built Binaryen optimizes and disassembles WebAssembly')
 elif component == 'wasi-sdk':
+    manifest = json.loads((root / 'sources/upstreams.json').read_text())
+    upstream = next(item for item in manifest['repositories'] if item['path'] == 'sources/wasi-sdk')
+    llvm = next(item for item in upstream['submodules'] if item['path'] == 'src/llvm-project')
+    for label, path, url, commit, tags in [
+        ('sdk', source, upstream['url'], upstream['commit'], True),
+        ('llvm', source / 'src/llvm-project', llvm['url'], llvm['commit'], False),
+    ]:
+        if not (path / '.git').exists():
+            run(label + '-git-init', ['git', 'init', path], cwd=path)
+            options = ['--tags'] if tags else ['--no-tags', '--depth=1']
+            run(label + '-git-fetch', ['git', 'fetch', *options, url, commit], cwd=path)
+            run(label + '-git-index', ['git', 'reset', '--mixed', commit], cwd=path)
+    run('sdk-version', ['python3', source / 'version.py'], cwd=source)
     toolchain = work / 'toolchain'
     sysroot = work / 'sysroot'
     flags = '-DLLVM_PARALLEL_LINK_JOBS=1 -DCMAKE_INSTALL_RPATH=$ORIGIN/../lib'
