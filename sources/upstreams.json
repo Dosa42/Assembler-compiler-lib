@@ -513,7 +513,23 @@
       ],
       "imported_at": "2026-11-12T07:39:52.321957+00:00",
       "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
+    },
+    {
+      "fetch_url": "https://github.com/emscripten-core/emsdk.git",
+      "upstream_tree": "1550e4af1125077002790086f51c957396dea948",
+      "tree": "1550e4af1125077002790086f51c957396dea948",
+      "file_count": 138,
+      "submodules": [],
+      "path": "sources/emsdk",
+      "url": "https://github.com/emscripten-core/emsdk.git",
+      "branch": "main",
+      "commit": "1693ce7359fc9694f198694f902a2cc061239b86",
+      "components": [
+        "Emscripten SDK manager"
+      ],
+      "imported_at": "2026-11-12T07:40:07.461263+00:00",
+      "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
     }
   ],
-  "updated_at": "2026-11-12T07:39:52.321975+00:00"
+  "updated_at": "2026-11-12T07:40:07.461280+00:00"
 }
