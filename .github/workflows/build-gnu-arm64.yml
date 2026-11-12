@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
     paths:
-      - sources/**
+      - sources/gcc/**
+      - sources/binutils-gdb/**
+      - sources/newlib-cygwin/**
+      - sources/glibc/**
   workflow_call:
     inputs:
       component:
