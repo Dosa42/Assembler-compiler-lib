@@ -1,0 +1,338 @@
+// Copyright 2023 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+var LibraryEmbindShared = {
+  $InternalError: class extends Error {
+    constructor(message) {
+      super(message);
+      this.name = 'InternalError';
+    }
+  },
+  $BindingError: class extends Error {
+    constructor(message) {
+      super(message);
+      this.name = 'BindingError';
+    }
+  },
+
+  $throwInternalError: (message) => { throw new InternalError(message); },
+
+  $throwBindingError: (message) => { throw new BindingError(message); },
+
+  // typeID -> { toWireType: ..., fromWireType: ... }
+  $registeredTypes:  {},
+
+  // typeID -> [callback]
+  $awaitingDependencies: {},
+
+  // typeID -> [dependentTypes]
+  $typeDependencies: {},
+
+  $tupleRegistrations: {},
+
+  $structRegistrations: {},
+
+  $sharedRegisterType__docs: '/** @param {Object=} options */',
+  $sharedRegisterType: function(typeID, registeredInstance, options = {}) {
+    var name = registeredInstance.name;
+    if (!typeID) {
+      throwBindingError(`type "${name}" must have a positive integer typeid pointer`);
+    }
+    if (registeredTypes[typeID]) {
+      if (options.ignoreDuplicateRegistrations) {
+        return;
+      } else {
+        throwBindingError(`Cannot register type '${name}' twice`);
+      }
+    }
+
+    registeredTypes[typeID] = registeredInstance;
+    delete typeDependencies[typeID];
+
+    if (awaitingDependencies[typeID]) {
+      var callbacks = awaitingDependencies[typeID];
+      delete awaitingDependencies[typeID];
+      callbacks.forEach((cb) => cb());
+    }
+  },
+
+  $whenDependentTypesAreResolved: (myTypes, dependentTypes, getTypeConverters) => {
+    myTypes.forEach((type) => typeDependencies[type] = dependentTypes);
+
+    function onComplete(typeConverters) {
+      var myTypeConverters = getTypeConverters(typeConverters);
+      if (myTypeConverters.length !== myTypes.length) {
+        throwInternalError('Mismatched type converter count');
+      }
+      for (var i = 0; i < myTypes.length; ++i) {
+        registerType(myTypes[i], myTypeConverters[i]);
+      }
+    }
+
+    var typeConverters = new Array(dependentTypes.length);
+    var unregisteredTypes = [];
+    var registered = 0;
+    for (let [i, dt] of dependentTypes.entries()) {
+      if (registeredTypes[dt]) {
+        typeConverters[i] = registeredTypes[dt];
+      } else {
+        unregisteredTypes.push(dt);
+        (awaitingDependencies[dt] ??= []).push(() => {
+          typeConverters[i] = registeredTypes[dt];
+          ++registered;
+          if (registered === unregisteredTypes.length) {
+            onComplete(typeConverters);
+          }
+        });
+      }
+    }
+    if (0 === unregisteredTypes.length) {
+      onComplete(typeConverters);
+    }
+  },
+
+  $getTypeName__deps: ['__getTypeName', 'free'],
+  $getTypeName: (typeID) => {
+    var ptr = ___getTypeName(typeID);
+    var rv = AsciiToString(ptr);
+    _free(ptr);
+    return rv;
+  },
+  $getFunctionName__deps: [],
+  $getFunctionName: (signature) => {
+    signature = signature.trim();
+    const argsIndex = signature.indexOf('(');
+    if (argsIndex === -1) return signature;
+#if ASSERTIONS
+    assert(signature.endsWith(')'), 'Parentheses for argument names should match.');
+#endif
+    return signature.slice(0, argsIndex);
+  },
+  $getFunctionArgsName__deps: [],
+  $getFunctionArgsName: (signature) => {
+    signature = signature.trim();
+    const argsIndex = signature.indexOf('(');
+    if (argsIndex == -1) return; // Return undefined to mean we don't have any argument names
+#if ASSERTIONS
+    assert(signature.endsWith(')'), 'Parentheses for argument names should match.');
+#endif
+    return signature.slice(argsIndex + 1, -1).replaceAll(' ', '').split(',').filter(n => n.length);
+  },
+  $heap32VectorToArray: (count, firstElement) => {
+    var array = [];
+    for (var i = 0; i < count; i++) {
+      // TODO(https://github.com/emscripten-core/emscripten/issues/17310):
+      // Find a way to hoist the `>> 2` or `>> 3` out of this loop.
+      array.push({{{ makeGetValue('firstElement', `i * ${POINTER_SIZE}`, '*') }}});
+    }
+    return array;
+  },
+
+  $requireRegisteredType: (typeID, humanName) => {
+    var impl = registeredTypes[typeID];
+    if (undefined === impl) {
+      throwBindingError(`${humanName} has unknown type ${getTypeName(typeID)}`);
+    }
+    return impl;
+  },
+
+  $usesDestructorStack(argTypes) {
+    // Skip return value at index 0 - it's not deleted here.
+    for (var i = 1; i < argTypes.length; ++i) {
+      if (argTypes[i]?.usesDestructor) {
+        return true;
+      }
+    }
+    return false;
+  },
+
+  // Trivially constructible/destructible value types (argStackAlloc) place
+  // their argument temporaries on the wasm stack when the invoker brackets
+  // the call in stackSave/stackRestore, skipping the per-call heap temp and
+  // destructor bookkeeping entirely.
+  $argsUseStackAlloc(argTypes) {
+    // Skip return value at index 0 - only arguments stack-allocate.
+    for (var i = 1; i < argTypes.length; ++i) {
+      if (argTypes[i] !== null && argTypes[i].argStackAlloc) {
+        return true;
+      }
+    }
+    return false;
+  },
+
+  // Many of the JS invoker functions are generic and can be reused for multiple
+  // function bindings. This function needs to match createJsInvoker and create
+  // a unique signature for any inputs that will create different invoker
+  // function outputs.
+  $createJsInvokerSignature(argTypes, isClassMethodFunc, returns, isAsync) {
+    const signature = [
+      isClassMethodFunc ? 't' : 'f',
+      returns ? 't' : 'f',
+      isAsync ? 't' : 'f'
+    ];
+    for (let i = isClassMethodFunc ? 1 : 2; i < argTypes.length; ++i) {
+      const arg = argTypes[i];
+      let destructorSig = '';
+      if (arg.argStackAlloc) {
+        // Stack-allocated trivial value type: needs no destructor, but the
+        // invoker must bracket the call in a stack frame.
+        destructorSig = 's';
+      } else if (arg.usesDestructor) {
+        destructorSig = 'd';
+      } else {
+        destructorSig = 'n';
+      }
+      signature.push(destructorSig);
+    }
+    return signature.join('');
+  },
+
+  $checkArgCount(numArgs, minArgs, maxArgs, humanName, throwBindingError) {
+    if (numArgs < minArgs || numArgs > maxArgs) {
+      var argCountMessage = minArgs == maxArgs ? minArgs : `${minArgs} to ${maxArgs}`;
+      throwBindingError(`function ${humanName} called with ${numArgs} arguments, expected ${argCountMessage}`);
+    }
+  },
+
+  $getEnumValueType(rawValueType) {
+    // This must match the values of enum_value_type in wire.h
+    return !rawValueType ? 'object' : (rawValueType === 1 ? 'number' : 'string');
+  },
+
+  $getRequiredArgCount(argTypes) {
+    var requiredArgCount = argTypes.length - 2;
+    for (var i = argTypes.length - 1; i >= 2; --i) {
+      if (!argTypes[i].optional) {
+        break;
+      }
+      requiredArgCount--;
+    }
+    return requiredArgCount;
+  },
+
+  $createJsInvoker__deps: [
+#if ASSERTIONS
+    '$checkArgCount',
+#endif
+  ],
+  $createJsInvoker(argTypes, isClassMethodFunc, returns, isAsync) {
+    var needsDestructorStack = usesDestructorStack(argTypes);
+    var argsNeedStack = argsUseStackAlloc(argTypes);
+#if ASYNCIFY == 1
+    // Any call may suspend under Asyncify, and destructors run deferred in
+    // onDone, after a stack frame would already be gone.
+    var useStackFrame = false;
+#else
+    // JSPI-async invokers resume after the frame would be gone, so they
+    // defer through the destructors array instead.
+    var useStackFrame = argsNeedStack && !isAsync && !needsDestructorStack;
+#endif
+    if (argsNeedStack && !useStackFrame) {
+      // A stack-allocating type must never see a null destructors argument
+      // without a bracketing frame; route it through the destructors array
+      // (it heap-allocates on that path).
+      needsDestructorStack = true;
+    }
+    var argCount = argTypes.length - 2;
+    var argsList = [];
+    var argsListWired = ['fn'];
+    if (isClassMethodFunc) {
+      argsListWired.push('thisWired');
+    }
+    for (var i = 0; i < argCount; ++i) {
+      argsList.push(`arg${i}`)
+      argsListWired.push(`arg${i}Wired`)
+    }
+    argsList = argsList.join()
+    argsListWired = argsListWired.join()
+
+    var invokerFnBody = `return function (${argsList}) {\n`;
+
+#if ASSERTIONS
+    invokerFnBody += 'checkArgCount(arguments.length, minArgs, maxArgs, humanName, throwBindingError);\n';
+#endif
+
+#if EMSCRIPTEN_TRACING
+    invokerFnBody += `Module.emscripten_trace_enter_context('embind::' + humanName );\n`;
+#endif
+
+    if (needsDestructorStack) {
+      invokerFnBody += 'var destructors = [];\n';
+    }
+    if (useStackFrame) {
+      invokerFnBody += 'var sp = stackSave();\n';
+    }
+
+    var dtorStack = needsDestructorStack ? 'destructors' : 'null';
+    var args1 = ['humanName', 'throwBindingError', 'invoker', 'fn', 'runDestructors', 'fromRetWire', 'toClassParamWire'];
+    if (useStackFrame) {
+      args1.push('stackSave', 'stackRestore');
+    }
+
+#if EMSCRIPTEN_TRACING
+    args1.push('Module');
+#endif
+
+    if (isClassMethodFunc) {
+      invokerFnBody += `var thisWired = toClassParamWire(${dtorStack}, this);\n`;
+    }
+
+    for (var i = 0; i < argCount; ++i) {
+      var argName = `toArg${i}Wire`;
+      invokerFnBody += `var arg${i}Wired = ${argName}(${dtorStack}, arg${i});\n`;
+      args1.push(argName);
+    }
+
+    invokerFnBody += (returns || isAsync ? 'var rv = ' : '') + `invoker(${argsListWired});\n`;
+    if (useStackFrame) {
+      // The callee has consumed the stack-allocated argument temporaries;
+      // release the frame before any post-call work. Not restored on an
+      // exception path, matching the rest of emscripten (see the exceptions
+      // docs on stackSave/stackRestore at JS catch sites).
+      invokerFnBody += 'stackRestore(sp);\n';
+    }
+
+    var returnVal = returns ? 'rv' : '';
+#if ASYNCIFY == 1
+    args1.push('Asyncify');
+#endif
+#if ASYNCIFY
+    invokerFnBody += `function onDone(${returnVal}) {\n`;
+#endif
+
+    if (needsDestructorStack) {
+      invokerFnBody += 'runDestructors(destructors);\n';
+    }
+
+    if (returns) {
+      invokerFnBody += 'var ret = fromRetWire(rv);\n' +
+#if EMSCRIPTEN_TRACING
+                       'Module.emscripten_trace_exit_context();\n' +
+#endif
+                       'return ret;\n';
+    } else {
+#if EMSCRIPTEN_TRACING
+      invokerFnBody += 'Module.emscripten_trace_exit_context();\n';
+#endif
+    }
+
+#if ASYNCIFY == 1
+    invokerFnBody += '}\n';
+    invokerFnBody += `return Asyncify.currData ? Asyncify.whenDone().then(onDone) : onDone(${returnVal});\n`
+#elif ASYNCIFY == 2
+    invokerFnBody += '}\n';
+    invokerFnBody += 'return ' + (isAsync ? 'rv.then(onDone)' : `onDone(${returnVal})`) + ';';
+#endif
+
+    invokerFnBody += '}\n';
+
+#if ASSERTIONS
+    args1.push('checkArgCount', 'minArgs', 'maxArgs');
+    invokerFnBody = `if (arguments.length !== ${args1.length}){ throw new Error(humanName + "Expected ${args1.length} closure arguments " + arguments.length + " given."); }\n${invokerFnBody}`;
+#endif
+    return new Function(args1, invokerFnBody);
+  }
+};
+
+addToLibrary(LibraryEmbindShared);

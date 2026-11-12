@@ -1,0 +1,174 @@
+/**
+ * @license
+ * Copyright 2032 The Emscripten Authors
+ * SPDX-License-Identifier: MIT
+ */
+
+addToLibrary({
+  $preloadPlugins__postset: () => addAtModule(makeModuleReceive('preloadPlugins')),
+  $preloadPlugins: [],
+
+#if !MINIMAL_RUNTIME
+  // Tries to handle an input byteArray using preload plugins. Returns true if
+  // it was handled.
+  $FS_handledByPreloadPlugin__internal: true,
+  $FS_handledByPreloadPlugin: async (byteArray, fullname) => {
+#if LibraryManager.has('libbrowser.js')
+    // Ensure plugins are ready.
+    if (typeof Browser !== 'undefined') Browser.init();
+#endif
+
+    for (var plugin of preloadPlugins) {
+      if (plugin['canHandle'](fullname)) {
+#if ASSERTIONS
+        assert(plugin['handle'].constructor.name === 'AsyncFunction', 'Filesystem plugin handlers must be async functions (See #24914)')
+#endif
+        return plugin['handle'](byteArray, fullname);
+      }
+    }
+    // If no plugin handled this file then return the original/unmodified
+    // byteArray.
+    return byteArray;
+  },
+
+  // Legacy version of FS_preloadFile that uses callback rather than async
+  $FS_createPreloadedFile: (parent, name, url, canRead = undefined, canWrite = undefined, onload = undefined, onerror = undefined, dontCreateFile = undefined, canOwn = undefined, preFinish = undefined) => {
+    FS_preloadFile(parent, name, url, canRead, canWrite, dontCreateFile, canOwn, preFinish).then(onload).catch(onerror);
+  },
+
+  // Preloads a file asynchronously. You can call this before run, for example in
+  // preRun. run will be delayed until this file arrives and is set up.
+  // If you call it after run(), you may want to pause the main loop until it
+  // completes, if so, you can use the onload parameter to be notified when
+  // that happens.
+  // In addition to normally creating the file, we also asynchronously preload
+  // the browser-friendly versions of it: For an image, we preload an Image
+  // element and for an audio, and Audio. These are necessary for SDL_Image
+  // and _Mixer to find the files in preloadedImages/Audios.
+  // You can also call this with a typed array instead of a url. It will then
+  // do preloading for the Image/Audio part, as if the typed array were the
+  // result of an XHR that you did manually.
+  $FS_preloadFile: async (parent, name, url, canRead = undefined, canWrite = undefined, dontCreateFile = undefined, canOwn = undefined, preFinish = undefined) => {
+    // TODO we should allow people to just pass in a complete filename instead
+    // of parent and name being that we just join them anyways
+    var fullname = name ? PATH_FS.resolve(PATH.join2(parent, name)) : parent;
+    var dep = getUniqueRunDependency(`cp ${fullname}`); // might have several active requests for the same fullname
+    addRunDependency(dep);
+
+    try {
+      var byteArray = url;
+      if (typeof url === 'string') {
+        byteArray = await asyncLoad(url);
+      }
+
+      byteArray = await FS_handledByPreloadPlugin(byteArray, fullname);
+      preFinish?.();
+      if (!dontCreateFile) {
+        FS_createDataFile(parent, name, byteArray, canRead, canWrite, canOwn);
+      }
+    } finally {
+      removeRunDependency(dep);
+    }
+  },
+#endif
+
+  // convert the 'r', 'r+', etc. to its corresponding set of O_* flags
+  $FS_modeStringToFlags: (str) => {
+    if (typeof str !== 'string') return str;
+    var flagModes = {
+      'r': O_RDONLY,
+      'r+': O_RDWR,
+      'w': O_TRUNC | O_CREAT | O_WRONLY,
+      'w+': O_TRUNC | O_CREAT | O_RDWR,
+      'a': O_APPEND | O_CREAT | O_WRONLY,
+      'a+': O_APPEND | O_CREAT | O_RDWR,
+    };
+    var flags = flagModes[str];
+    if (typeof flags === 'undefined') {
+      throw new Error(`Unknown file open mode: ${str}`);
+    }
+    return flags;
+  },
+  $FS_getMode: (canRead, canWrite) => {
+    var mode = 0;
+    if (canRead) mode |= S_IRUGO | S_IXUGO;
+    if (canWrite) mode |= S_IWUGO;
+    return mode;
+  },
+
+  $FS_fileDataToTypedArray: (data) => {
+    if (typeof data === 'string') {
+      data = intArrayFromString(data, true);
+    }
+    if (!data.subarray) {
+      data = new Uint8Array(data);
+    }
+    return data;
+  },
+
+  $FS_stdin_getChar_buffer: [],
+
+  // getChar has 3 particular return values:
+  // a.) the next character represented as an integer
+  // b.) undefined to signal that no data is currently available
+  // c.) null to signal an EOF
+  $FS_stdin_getChar: () => {
+    if (!FS_stdin_getChar_buffer.length) {
+      var result = null;
+#if ENVIRONMENT_MAY_BE_NODE
+      if (ENVIRONMENT_IS_NODE) {
+        // we will read data by chunks of BUFSIZE
+        var BUFSIZE = 256;
+        var buf = Buffer.alloc(BUFSIZE);
+        var bytesRead = 0;
+
+        try {
+          bytesRead = fs.readSync(process.stdin.fd, buf, 0, BUFSIZE);
+        } catch(e) {
+          // Cross-platform differences: on Windows, reading EOF throws an
+          // exception, but on other OSes, reading EOF returns 0. Uniformize
+          // behavior by treating the EOF exception to return 0.
+          if (e.toString().includes('EOF')) bytesRead = 0;
+          else throw e;
+        }
+
+        if (bytesRead > 0) {
+          result = buf.toString('utf-8', 0, bytesRead);
+        }
+      } else
+#endif
+#if ENVIRONMENT_MAY_BE_WEB
+      if (globalThis.window?.prompt) {
+        // Browser.
+        result = window.prompt('Input: ');  // returns null on cancel
+        if (result !== null) {
+          result += '\n';
+        }
+      } else
+#endif
+#if ENVIRONMENT_MAY_BE_SHELL
+      if (globalThis.readline) {
+        /** @suppress{checkTypes, undefinedVars} */
+        result = readline();
+        if (result) {
+          result += '\n';
+        }
+      } else
+#endif
+      {}
+      if (!result) {
+        return null;
+      }
+      FS_stdin_getChar_buffer = intArrayFromString(result, true);
+    }
+    return FS_stdin_getChar_buffer.shift();
+  },
+
+  $FS_unlink: 'FS.unlink',
+
+  $FS_createPath: 'FS.createPath',
+
+  $FS_createDevice: 'FS.createDevice',
+
+  $FS_readFile: 'FS.readFile',
+});

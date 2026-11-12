@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  create:
+    tags:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    name: Archive
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: make dist
+      run: |
+        make dist
+        version=`cat emscripten-version.txt | sed s/\"//g`
+        echo "VERSION=$version" >> $GITHUB_ENV
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: emscripten-${{ env.VERSION }}
+        path: emscripten-${{ env.VERSION }}.tar.bz2
+
+  codesize-checks:
+    name: Codesize Checks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - name: Read emsdk version
+        id: emsdk_version
+        run: echo "version=$(cat test/emsdk_version.txt)" >> $GITHUB_OUTPUT
+      - name: Install emsdk
+        uses: emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
+        with:
+          version: ${{ steps.emsdk_version.outputs.version }}
+          # The version of the emsdk repo that we use here is still not pinned.
+          # TODO(sbc): Pin (and auto-roll) this revision too.
+          emsdk-version: main
+      - name: Set EM_CONFIG
+        run:
+          echo "EM_CONFIG=$EMSDK/.emscripten" >> $GITHUB_ENV
+      - name: pip install
+        run: |
+          which python3
+          python3 --version
+          python3 -m pip install -r requirements-dev.txt
+      - name: Check codesize expectations
+        run: |
+          ./bootstrap.py
+          if ! ./tools/maint/rebaseline_tests.py --check-only; then
+            echo "Test expectations are out-of-date on the PR branch."
+            echo ""
+            echo "You can run './tools/maint/rebaseline_tests.py' to"
+            echo "create a commit updating the expectations."
+            echo ""
+            echo "Be sure that you have installed the current emsdk version.  See test/emsdk_version.txt ($(cat test/emsdk_version.txt))."
+            echo ""
+            echo "Full diff from the current expectations to the rebaselined expectations:"
+            echo ""
+            git --no-pager diff
+            echo ""
+            exit 1
+          fi
+
+  clang-format-diff:
+    # This job is disabled until we can make it more precise
+    if: false
+    env:
+      LLVM_VERSION: 19
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Fetch all history for all tags and branches
+      with:
+        fetch-depth: 0
+    - name: Install clang-format
+      run: |
+        sudo apt-get install clang-format-19
+        sudo update-alternatives --install /usr/bin/git-clang-format git-clang-format /usr/bin/git-clang-format-19 100
+    - run: tools/maint/clang-format-diff.sh origin/$GITHUB_BASE_REF
+
+  build-pylauncher-x64:
+    name: Build pylauncher (x64)
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      with:
+        arch: x64
+    - name: Build pylauncher
+      run: |
+        cd tools\pylauncher
+        call build.bat
+      shell: cmd
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: pylauncher.exe
+        path: tools/pylauncher/pylauncher.exe
+
+  build-pylauncher-arm64:
+    name: Build pylauncher (ARM64)
+    runs-on: windows-11-arm
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      with:
+        arch: arm64
+    - name: Build pylauncher
+      run: |
+        cd tools\pylauncher
+        call build.bat arm64
+      shell: cmd
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: pylauncher-arm64.exe
+        path: tools/pylauncher/pylauncher-arm64.exe

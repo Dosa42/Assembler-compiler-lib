@@ -1,0 +1,2 @@
+during_exit 1
+Aborted(Assertion failed: handleSleep called after Asyncify was shut down)

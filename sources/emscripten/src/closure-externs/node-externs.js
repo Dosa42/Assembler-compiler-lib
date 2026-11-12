@@ -1,0 +1,181 @@
+/**
+ * @type {Object.<string,*>}
+ */
+var ws = {};
+
+/**
+ * @param {string} event
+ * @param {function()} callback
+ */
+ws.on = function(event, callback) {};
+
+/**
+ * @param {Object} data
+ * @param {Object} flags
+ * @param {function()=} callback
+ */
+ws.send = function(data, flags, callback) {};
+
+/**
+* @type {boolean}
+*/
+ws.binaryType;
+
+/**
+ * @type {Object.<string,*>}
+ */
+var wss = ws.Server;
+
+/**
+ * @param {string} event
+ * @param {function()} callback
+ */
+wss.on = function(event, callback) {};
+
+/**
+ * @param {function()} callback
+ */
+wss.broadcast = function(callback) {};
+
+/**
+* @type {Object.<string,*>}
+*/
+wss._socket;
+
+/**
+* @type {string}
+*/
+wss.url;
+
+/**
+* @type {string}
+*/
+wss._socket.remoteAddress;
+
+/**
+* @type {number}
+*/
+wss._socket.remotePort;
+
+/**
+ * @suppress {duplicate}
+ */
+var fs;
+
+/**
+ * @param {...*} var_args
+ * @constructor
+ * @nosideeffects
+ */
+var Buffer = function(var_args) {};
+
+/**
+ * @param {ArrayBuffer|SharedArrayBuffer|string} arrayBufferOrString
+ * @param {number|string=} byteOffsetOrEncoding
+ * @param {number=} length
+ * @return {nodeBuffer.Buffer}
+ * @nosideeffects
+ */
+Buffer.from = function(arrayBufferOrString, byteOffsetOrEncoding, length) {};
+
+/**
+ * @param {number} size
+ * @param {(string|!Buffer|number)=} fill
+ * @param {string=} encoding
+ * @return {!Buffer}
+ */
+Buffer.alloc = function(size, fill, encoding) {};
+
+/**
+ * @return {boolean}
+ * @nosideeffects
+ */
+Buffer.isBuffer = function(obj) {};
+
+/**
+ * @param {string=} encoding
+ * @param {number=} start
+ * @param {number=} end
+ * @nosideeffects
+ */
+Buffer.prototype.toString = function(encoding, start, end) {};
+
+Worker.prototype.ref = function() {};
+Worker.prototype.unref = function() {};
+
+/**
+ * @type {number}
+ */
+fs.Stats.prototype.atimeMs;
+
+/**
+ * @type {number}
+ */
+fs.Stats.prototype.mtimeMs;
+
+/**
+ * @type {number}
+ */
+fs.Stats.prototype.ctimeMs;
+
+/**
+ * @type {number}
+ */
+fs.Stats.prototype.blksize;
+
+/**
+ * @const
+ */
+fs.constants = {
+  O_APPEND: 0,
+  O_CREAT: 0,
+  O_EXCL: 0,
+  O_NOCTTY: 0,
+  O_RDONLY: 0,
+  O_RDWR: 0,
+  O_SYNC: 0,
+  O_TRUNC: 0,
+  O_WRONLY: 0,
+  O_NOFOLLOW: 0,
+};
+
+/**
+ * @param {string} p
+ * @return {boolean}
+ * @nosideeffects
+ */
+path.isAbsolute;
+
+/**
+ * @type {Object.<string,*>}
+ */
+path.posix;
+
+crypto.randomFillSync;
+
+/**
+ * @suppress {duplicate}
+ */
+var worker_threads = {};
+
+/**
+ * @type {boolean}
+ */
+worker_threads.isMainThread;
+
+/**
+ * @type {function()}
+ */
+worker_threads.Worker;
+
+/**
+ * @type {Object}
+ */
+worker_threads.workerData;
+
+worker_threads.parentPort;
+
+/**
+ * @type {number}
+ */
+process.stdin.fd;

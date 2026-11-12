@@ -1,0 +1,88 @@
+# Config file
+.emscripten
+.emscripten_backup
+
+# Emsdk generated version info
+.emsdk_version
+
+# vim/emacs temporary/backup files
+*~
+*.swp
+
+# Compiled python files
+__pycache__
+
+# Default emscripten cache
+/cache
+
+# Ignore only the root node_modules, but not any further down the path
+/node_modules/
+
+# Python coverage tool output
+.coverage
+.coverage.*
+tools/coverage/
+htmlcov/
+coverage.xml
+
+.DS_Store
+
+# Test output
+/out/
+
+# When updating the website we check it out here.
+/site/emscripten-site/
+
+# Build files for windows pylauncher
+/tools/pylauncher/*.obj
+/tools/pylauncher/*.res
+
+# Shell scripts (created by ./tools/maint/create_entry_points.py)
+em++
+emcc
+em-config
+emar
+embuilder
+emcmake
+emconfigure
+emdump
+emdwp
+emmake
+emnm
+empath-split
+emprofile
+emranlib
+emrun
+emscan-deps
+emscons
+emsize
+emstrip
+emsymbolizer
+test/runner
+tools/file_packager
+tools/webidl_binder
+
+# Windows .exe files (created by ./tools/maint/create_entry_points.py)
+em++.exe
+emcc.exe
+em-config.exe
+emar.exe
+embuilder.exe
+emcmake.exe
+emconfigure.exe
+emdump.exe
+emdwp.exe
+emmake.exe
+emnm.exe
+empath-split.exe
+emprofile.exe
+emranlib.exe
+emrun.exe
+emscan-deps.exe
+emscons.exe
+emsize.exe
+emstrip.exe
+emsymbolizer.exe
+tools/file_packager.exe
+tools/webidl_binder.exe
+test/runner.exe

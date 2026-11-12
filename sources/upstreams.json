@@ -469,7 +469,51 @@
       ],
       "imported_at": "2026-11-12T07:39:02.576047+00:00",
       "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
+    },
+    {
+      "fetch_url": "https://github.com/emscripten-core/emscripten.git",
+      "upstream_tree": "126b0a98da5abcd621733e5a811cbb70b113189f",
+      "tree": "87ba5548bf01e8ea1ee6f2cfa3af8d5958cf7b6c",
+      "file_count": 15311,
+      "submodules": [
+        {
+          "path": "test/third_party/googletest",
+          "url": "https://github.com/google/googletest",
+          "commit": "52eb8108c5bdec04579160ae17225d66034bd723",
+          "fetch_url": "https://github.com/google/googletest",
+          "upstream_tree": "ad23b2ceac4a6eef2278c48545b62ffc1f0c134a",
+          "tree": "ad23b2ceac4a6eef2278c48545b62ffc1f0c134a",
+          "file_count": 250
+        },
+        {
+          "path": "test/third_party/posixtestsuite",
+          "url": "https://github.com/emscripten-core/posixtestsuite",
+          "commit": "85555325079ea362fa680bd2209c843cfe47e670",
+          "fetch_url": "https://github.com/emscripten-core/posixtestsuite",
+          "upstream_tree": "719a4aad6d927452205cea1090fc6c73f52172ea",
+          "tree": "719a4aad6d927452205cea1090fc6c73f52172ea",
+          "file_count": 2867
+        },
+        {
+          "path": "test/third_party/wasi-test-suite",
+          "url": "https://github.com/khronosproject/wasi-test-suite",
+          "commit": "ac9371207fc61972a21d7d086074ca690a99d14d",
+          "fetch_url": "https://github.com/khronosproject/wasi-test-suite",
+          "upstream_tree": "ba943742e974d969a0c8f1fef7bf847f29afb6e7",
+          "tree": "ba943742e974d969a0c8f1fef7bf847f29afb6e7",
+          "file_count": 77
+        }
+      ],
+      "path": "sources/emscripten",
+      "url": "https://github.com/emscripten-core/emscripten.git",
+      "branch": "main",
+      "commit": "7d87834e6650a80f15a46743182408b254cbc673",
+      "components": [
+        "Emscripten"
+      ],
+      "imported_at": "2026-11-12T07:39:52.321957+00:00",
+      "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
     }
   ],
-  "updated_at": "2026-11-12T07:39:02.576075+00:00"
+  "updated_at": "2026-11-12T07:39:52.321975+00:00"
 }

@@ -1,0 +1,600 @@
+/**
+ * @license
+ * Copyright 2019 The Emscripten Authors
+ * SPDX-License-Identifier: MIT
+ */
+
+var WasiLibrary = {
+#if !MINIMAL_RUNTIME
+  $ExitStatus: class {
+    name = 'ExitStatus';
+    constructor(status) {
+      this.message = `Program terminated with exit(${status})`;
+      this.status = status;
+    }
+  },
+#endif
+
+  proc_exit__nothrow: true,
+  proc_exit: (code) => {
+#if MINIMAL_RUNTIME
+    throw `exit(${code})`;
+#else
+#if RUNTIME_DEBUG
+    dbg(`proc_exit: ${code} (keepRuntimeAlive=${keepRuntimeAlive()})`);
+#endif
+    EXITSTATUS = code;
+    if (!keepRuntimeAlive()) {
+#if PTHREADS
+      PThread.terminateAllThreads();
+#endif
+#if expectToReceiveOnModule('onExit')
+      Module['onExit']?.(code);
+#endif
+      ABORT = true;
+    }
+    quit_(code, new ExitStatus(code));
+#endif // MINIMAL_RUNTIME
+  },
+
+  sched_yield__nothrow: true,
+  sched_yield: () => 0,
+
+  $getEnvStrings: () => {
+    if (!getEnvStrings.strings) {
+      // Default values.
+      var lang = (globalThis.navigator?.language ?? 'C').replace('-', '_') + '.UTF-8';
+      var env = {
+#if !PURE_WASI
+        'USER': 'web_user',
+        'LOGNAME': 'web_user',
+        'PATH': '/',
+        'PWD': '/',
+        'HOME': '/home/web_user',
+        'LANG': lang,
+        '_': getExecutableName()
+#endif
+      };
+#if ENVIRONMENT_MAY_BE_NODE && NODE_HOST_ENV
+      if (ENVIRONMENT_IS_NODE) {
+        // When NODE_HOST_ENV is enabled we mirror the entire host environment.
+        env = process.env;
+      }
+#endif
+      // Apply the user-provided values, if any.
+      for (var x in ENV) {
+        // x is a key in ENV; if ENV[x] is undefined, that means it was
+        // explicitly set to be so. We allow user code to do that to
+        // force variables with default values to remain unset.
+        if (ENV[x] === undefined) delete env[x];
+        else env[x] = ENV[x];
+      }
+      var strings = [];
+      for (var x in env) {
+        strings.push(`${x}=${env[x]}`);
+      }
+      getEnvStrings.strings = strings;
+    }
+    return getEnvStrings.strings;
+  },
+
+  environ_sizes_get__nothrow: true,
+  environ_sizes_get: (penviron_count, penviron_buf_size) => {
+    var strings = getEnvStrings();
+    {{{ makeSetValue('penviron_count', 0, 'strings.length', SIZE_TYPE) }}};
+    var bufSize = 0;
+    for (var string of strings) {
+      bufSize += lengthBytesUTF8(string) + 1;
+    }
+    {{{ makeSetValue('penviron_buf_size', 0, 'bufSize', SIZE_TYPE) }}};
+    return 0;
+  },
+
+  environ_get__nothrow: true,
+  environ_get: (__environ, environ_buf) => {
+    var bufSize = 0;
+    var envp = 0;
+    for (var string of getEnvStrings()) {
+      var ptr = environ_buf + bufSize;
+      {{{ makeSetValue('__environ', 'envp', 'ptr', '*') }}};
+      bufSize += stringToUTF8(string, ptr, Infinity) + 1;
+      envp += {{{ POINTER_SIZE }}};
+    }
+    return 0;
+  },
+
+  // In normal (non-standalone) mode arguments are passed directly
+  // to main, and the `mainArgs` global does not exist.
+#if STANDALONE_WASM
+  args_sizes_get__nothrow: true,
+  args_sizes_get: (pargc, pargv_buf_size) => {
+#if MAIN_READS_PARAMS
+    {{{ makeSetValue('pargc', 0, 'mainArgs.length', SIZE_TYPE) }}};
+    var bufSize = 0;
+    for (var arg of mainArgs) {
+      bufSize += arg.length + 1;
+    }
+    {{{ makeSetValue('pargv_buf_size', 0, 'bufSize', SIZE_TYPE) }}};
+#else
+    {{{ makeSetValue('pargc', 0, '0', SIZE_TYPE) }}};
+#endif
+    return 0;
+  },
+
+  args_get__nothrow: true,
+  args_get: (argv, argv_buf) => {
+#if MAIN_READS_PARAMS
+    var bufSize = 0;
+    for (let [i, arg] of mainArgs.entries()) {
+      var ptr = argv_buf + bufSize;
+      {{{ makeSetValue('argv', `i*${POINTER_SIZE}`, 'ptr', '*') }}};
+      stringToAscii(arg, ptr);
+      bufSize += arg.length + 1;
+    }
+#endif
+    return 0;
+  },
+#endif
+
+  $checkWasiClock: (clock_id) => clock_id >= __WASI_CLOCKID_REALTIME && clock_id <= __WASI_CLOCKID_THREAD_CPUTIME_ID,
+
+  // TODO: the i64 in the API here must be legalized for this JS code to run,
+  // but the wasm file can't be legalized in standalone mode, which is where
+  // this is needed. To get this code to be usable as a JS shim we need to
+  // either wait for BigInt support or to legalize on the client.
+  clock_time_get__i53abi: true,
+  clock_time_get__nothrow: true,
+  clock_time_get__proxy: 'none',
+  clock_time_get: (clk_id, ignored_precision, ptime) => {
+    if (!checkWasiClock(clk_id)) {
+      return EINVAL;
+    }
+    var now;
+    // all wasi clocks but realtime are monotonic
+    if (clk_id === __WASI_CLOCKID_REALTIME) {
+      now = _emscripten_date_now();
+    } else if (nowIsMonotonic) {
+      now = _emscripten_get_now();
+    } else {
+      return ENOSYS;
+    }
+    // "now" is in ms, and wasi times are in ns.
+    var nsec = Math.round(now * 1_000_000);
+    {{{ makeSetValue('ptime', 0, 'nsec', 'i64') }}};
+    return 0;
+  },
+
+  clock_res_get__nothrow: true,
+  clock_res_get__proxy: 'none',
+  clock_res_get__deps: ['emscripten_get_now'],
+  clock_res_get: (clk_id, pres) => {
+    if (!checkWasiClock(clk_id)) {
+      return EINVAL;
+    }
+    var nsec;
+    // all wasi clocks but realtime are monotonic
+    if (clk_id === CLOCK_REALTIME) {
+      nsec = 1_000_000; // educated guess that it's milliseconds
+    } else if (nowIsMonotonic) {
+      nsec = _emscripten_get_now_res();
+    } else {
+      return ENOSYS;
+    }
+    {{{ makeSetValue('pres', 0, 'nsec', 'i64') }}};
+    return 0;
+  },
+
+#if SYSCALLS_REQUIRE_FILESYSTEM
+  $doReadv__docs: '/** @param {number=} offset */',
+  $doReadv: (stream, iov, iovcnt, offset) => {
+    var ret = 0;
+    for (var i = 0; i < iovcnt; i++) {
+      var ptr = {{{ makeGetValue('iov', C_STRUCTS.iovec.iov_base, '*') }}};
+      var len = {{{ makeGetValue('iov', C_STRUCTS.iovec.iov_len, '*') }}};
+      iov += {{{ C_STRUCTS.iovec.__size__ }}};
+      try {
+        var curr = FS.read(stream, HEAP8, ptr, len, offset);
+      } catch (e) {
+        // On a non-blocking stream a subsequent read may would-block after we
+        // already gathered data. POSIX readv is a single gather-read: return
+        // what we have rather than failing the whole call.
+        if (ret > 0 && e instanceof FS.ErrnoError &&
+            (e.errno == EAGAIN || e.errno == EWOULDBLOCK)) {
+          break;
+        }
+        throw e;
+      }
+      if (curr < 0) return -1;
+      ret += curr;
+      if (curr < len) break; // nothing more to read
+      if (typeof offset !== 'undefined') {
+        offset += curr;
+      }
+    }
+    return ret;
+  },
+  $doWritev__docs: '/** @param {number=} offset */',
+  $doWritev: (stream, iov, iovcnt, offset) => {
+    // Gather all iovecs into one contiguous buffer and issue a single
+    // FS.write, matching POSIX writev's single gather-write semantics (as
+    // __syscall_sendmsg already does). Per-iovec writes fragment a stream
+    // socket send into multiple segments, breaking stream byte semantics.
+    if (iovcnt == 1) {
+      // Single iovec: write directly from HEAP8, no gather buffer needed.
+      return FS.write(stream, HEAP8, {{{ makeGetValue('iov', C_STRUCTS.iovec.iov_base, '*') }}}, {{{ makeGetValue('iov', C_STRUCTS.iovec.iov_len, '*') }}}, offset);
+    }
+    var total = 0;
+    for (var i = 0, p = iov; i < iovcnt; i++, p += {{{ C_STRUCTS.iovec.__size__ }}}) {
+      total += {{{ makeGetValue('p', C_STRUCTS.iovec.iov_len, '*') }}};
+    }
+    var view = new Uint8Array(total);
+    var voff = 0;
+    for (var i = 0; i < iovcnt; i++, iov += {{{ C_STRUCTS.iovec.__size__ }}}) {
+      var ptr = {{{ makeGetValue('iov', C_STRUCTS.iovec.iov_base, '*') }}};
+      var len = {{{ makeGetValue('iov', C_STRUCTS.iovec.iov_len, '*') }}};
+      view.set(HEAPU8.subarray(ptr, ptr + len), voff);
+      voff += len;
+    }
+    return FS.write(stream, view, 0, total, offset);
+  },
+#else
+  // MEMFS filesystem disabled lite handling of stdout and stderr:
+  $printCharBuffers: [null, [], []], // 1 => stdout, 2 => stderr
+  $printCharBuffers__internal: true,
+  $printChar__internal: true,
+  $printChar: (stream, curr) => {
+    var buffer = printCharBuffers[stream];
+#if ASSERTIONS
+    assert(buffer);
+#endif
+    if (!curr || curr === {{{ charCode('\n') }}}) {
+      (stream === 1 ? out : err)(UTF8ArrayToString(buffer));
+      buffer.length = 0;
+    } else {
+      buffer.push(curr);
+    }
+  },
+#endif // SYSCALLS_REQUIRE_FILESYSTEM
+
+#if SYSCALLS_REQUIRE_FILESYSTEM
+#elif (!MINIMAL_RUNTIME || EXIT_RUNTIME)
+  $flush_NO_FILESYSTEM: () => {
+    // flush anything remaining in the buffers during shutdown
+#if hasExportedSymbol('fflush')
+    _fflush(0);
+#endif
+    if (printCharBuffers[1].length) printChar(1, {{{ charCode('\n') }}});
+    if (printCharBuffers[2].length) printChar(2, {{{ charCode('\n') }}});
+  },
+  fd_write__deps: ['$flush_NO_FILESYSTEM'],
+  fd_write__postset: () => addAtExit('flush_NO_FILESYSTEM()'),
+#else
+#endif
+  fd_write: (fd, iov, iovcnt, pnum) => {
+#if SYSCALLS_REQUIRE_FILESYSTEM
+    var stream = SYSCALLS.getStreamFromFD(fd);
+    var num = doWritev(stream, iov, iovcnt);
+#else
+    // hack to support printf in SYSCALLS_REQUIRE_FILESYSTEM=0
+    var num = 0;
+    for (var i = 0; i < iovcnt; i++) {
+      var ptr = {{{ makeGetValue('iov', C_STRUCTS.iovec.iov_base, '*') }}};
+      var len = {{{ makeGetValue('iov', C_STRUCTS.iovec.iov_len, '*') }}};
+      iov += {{{ C_STRUCTS.iovec.__size__ }}};
+      for (var j = 0; j < len; j++) {
+        printChar(fd, HEAPU8[ptr+j]);
+      }
+      num += len;
+    }
+#endif // SYSCALLS_REQUIRE_FILESYSTEM
+    {{{ makeSetValue('pnum', 0, 'num', SIZE_TYPE) }}};
+    return 0;
+  },
+
+  fd_pwrite__i53abi: true,
+  fd_pwrite: (fd, iov, iovcnt, offset, pnum) => {
+#if SYSCALLS_REQUIRE_FILESYSTEM
+    if (isNaN(offset)) return EFBIG;
+    var stream = SYSCALLS.getStreamFromFD(fd)
+    var num = doWritev(stream, iov, iovcnt, offset);
+    {{{ makeSetValue('pnum', 0, 'num', SIZE_TYPE) }}};
+    return 0;
+#elif ASSERTIONS
+    abort('fd_pwrite called without SYSCALLS_REQUIRE_FILESYSTEM');
+#else
+    return ENOSYS;
+#endif
+  },
+
+  fd_close: (fd) => {
+#if SYSCALLS_REQUIRE_FILESYSTEM
+    var stream = SYSCALLS.getStreamFromFD(fd);
+    FS.close(stream);
+    return 0;
+#elif PROXY_POSIX_SOCKETS
+    // close() is a tricky function because it can be used to close both regular file descriptors
+    // and POSIX network socket handles, hence an implementation would need to track for each
+    // file descriptor which kind of item it is. To simplify, when using PROXY_POSIX_SOCKETS
+    // option, use shutdown() to close a socket, and this function should behave like a no-op.
+    warnOnce('To close sockets with PROXY_POSIX_SOCKETS bridge, prefer to use the function shutdown() that is proxied, instead of close()')
+    return 0;
+#elif ASSERTIONS
+    abort('fd_close called without SYSCALLS_REQUIRE_FILESYSTEM');
+#else
+    return ENOSYS;
+#endif // SYSCALLS_REQUIRE_FILESYSTEM
+  },
+
+  fd_read: (fd, iov, iovcnt, pnum) => {
+#if SYSCALLS_REQUIRE_FILESYSTEM
+    var stream = SYSCALLS.getStreamFromFD(fd);
+    var num = doReadv(stream, iov, iovcnt);
+    {{{ makeSetValue('pnum', 0, 'num', SIZE_TYPE) }}};
+    return 0;
+#elif ASSERTIONS
+    abort('fd_read called without SYSCALLS_REQUIRE_FILESYSTEM');
+#else
+    return ENOSYS;
+#endif // SYSCALLS_REQUIRE_FILESYSTEM
+  },
+
+  fd_pread__i53abi: true,
+  fd_pread: (fd, iov, iovcnt, offset, pnum) => {
+#if SYSCALLS_REQUIRE_FILESYSTEM
+    if (isNaN(offset)) return EFBIG;
+    var stream = SYSCALLS.getStreamFromFD(fd)
+    var num = doReadv(stream, iov, iovcnt, offset);
+    {{{ makeSetValue('pnum', 0, 'num', SIZE_TYPE) }}};
+    return 0;
+#elif ASSERTIONS
+    abort('fd_pread called without SYSCALLS_REQUIRE_FILESYSTEM');
+#else
+    return ENOSYS;
+#endif
+  },
+
+  fd_seek__i53abi: true,
+  fd_seek: (fd, offset, whence, newOffset) => {
+#if SYSCALLS_REQUIRE_FILESYSTEM
+    if (isNaN(offset)) return EFBIG;
+    var stream = SYSCALLS.getStreamFromFD(fd);
+    FS.llseek(stream, offset, whence);
+    {{{ makeSetValue('newOffset', '0', 'stream.position', 'i64') }}};
+    if (stream.getdents && !offset && whence === SEEK_SET) stream.getdents = null; // reset readdir state
+    return 0;
+#else
+    return ESPIPE;
+#endif
+  },
+
+  $wasiRightsToMuslOFlags: (rights) => {
+#if SYSCALL_DEBUG
+    dbg(`wasiRightsToMuslOFlags: ${rights}`);
+#endif
+    if ((rights & __WASI_RIGHTS_FD_READ) && (rights & __WASI_RIGHTS_FD_WRITE)) {
+      return O_RDWR;
+    }
+    if (rights & __WASI_RIGHTS_FD_READ) {
+      return O_RDONLY;
+    }
+    if (rights & __WASI_RIGHTS_FD_WRITE) {
+      return O_WRONLY;
+    }
+    throw new FS.ErrnoError(EINVAL);
+  },
+
+  $wasiOFlagsToMuslOFlags: (oflags) => {
+    var musl_oflags = 0;
+    if (oflags & __WASI_OFLAGS_CREAT) {
+      musl_oflags |= O_CREAT;
+    }
+    if (oflags & __WASI_OFLAGS_TRUNC) {
+      musl_oflags |= O_TRUNC;
+    }
+    if (oflags & __WASI_OFLAGS_DIRECTORY) {
+      musl_oflags |= O_DIRECTORY;
+    }
+    if (oflags & __WASI_OFLAGS_EXCL) {
+      musl_oflags |= O_EXCL;
+    }
+    return musl_oflags;
+  },
+
+#if PURE_WASI
+  // preopen maps open file descriptors to pathname.
+  // In emscripten we already have a VFS layer so (for now) we expose the entire
+  // VFS to the wasi API.
+  $preopens: {3: '/'},
+
+  path_open__sig: 'iiiiiiiiii',
+  path_open: (fd, dirflags, path, path_len, oflags,
+              fs_rights_base, fs_rights_inheriting,
+              fdflags, opened_fd) => {
+    if (!(fd in preopens)) {
+      return EBADF;
+    }
+    var pathname = UTF8ToString(path, path_len);
+    var musl_oflags = wasiRightsToMuslOFlags(Number(fs_rights_base));
+#if SYSCALL_DEBUG
+    dbg(`oflags1: ${ptrToString(musl_oflags)}`);
+#endif
+    musl_oflags |= wasiOFlagsToMuslOFlags(Number(oflags));
+#if SYSCALL_DEBUG
+    dbg(`oflags2: ${ptrToString(musl_oflags)}`);
+#endif
+    var stream = FS.open(pathname, musl_oflags);
+    {{{ makeSetValue('opened_fd', '0', 'stream.fd', 'i32') }}};
+    return 0;
+  },
+
+  fd_prestat_dir_name__sig: 'iiii',
+  fd_prestat_dir_name__nothrow: true,
+  fd_prestat_dir_name: (fd, path, path_len) => {
+    if (!(fd in preopens)) {
+      return EBADF;
+    }
+    var preopen_path = preopens[fd];
+    stringToUTF8(preopen_path, path, path_len)
+#if SYSCALL_DEBUG
+    dbg(`fd_prestat_dir_name -> "${preopen_path}"`);
+#endif
+    return 0;
+  },
+
+  fd_prestat_get__sig: 'iii',
+  fd_prestat_get__nothrow: true,
+  fd_prestat_get: (fd, stat_buf) => {
+    if (!(fd in preopens)) {
+      return EBADF;
+    }
+    var preopen = preopens[fd];
+    {{{ makeSetValue('stat_buf', C_STRUCTS.__wasi_prestat_t.pr_type, '__WASI_PREOPENTYPE_DIR', 'i8') }}};
+    {{{ makeSetValue('stat_buf', C_STRUCTS.__wasi_prestat_t.u + C_STRUCTS.__wasi_prestat_dir_t.pr_name_len, 'preopen.length', 'i64') }}};
+    return 0;
+  },
+
+  fd_fdstat_set_flags__sig: 'iii',
+  fd_fdstat_set_flags: (fd, flags) => {
+    // TODO(sbc): implement
+    var stream = SYSCALLS.getStreamFromFD(fd);
+    return 0;
+  },
+
+  fd_filestat_get__sig: 'iii',
+  fd_filestat_get: (fd, stat_buf) => {
+    // TODO(sbc): implement
+    var stream = SYSCALLS.getStreamFromFD(fd);
+    {{{ makeSetValue('stat_buf', C_STRUCTS.__wasi_filestat_t.dev, '0', 'i64') }}};
+    {{{ makeSetValue('stat_buf', C_STRUCTS.__wasi_filestat_t.ino, '0', 'i64') }}};
+    {{{ makeSetValue('stat_buf', C_STRUCTS.__wasi_filestat_t.filetype, '0', 'i8') }}};
+    {{{ makeSetValue('stat_buf', C_STRUCTS.__wasi_filestat_t.nlink, '0', 'i64') }}};
+    {{{ makeSetValue('stat_buf', C_STRUCTS.__wasi_filestat_t.size, '0', 'i64') }}};
+    {{{ makeSetValue('stat_buf', C_STRUCTS.__wasi_filestat_t.atim, '0', 'i64') }}};
+    {{{ makeSetValue('stat_buf', C_STRUCTS.__wasi_filestat_t.mtim, '0', 'i64') }}};
+    {{{ makeSetValue('stat_buf', C_STRUCTS.__wasi_filestat_t.ctim, '0', 'i64') }}};
+    return 0;
+  },
+#endif
+
+  fd_fdstat_get: (fd, pbuf) => {
+    var rightsBase = 0;
+    var rightsInheriting = 0;
+    var flags = 0;
+#if PURE_WASI
+    if (fd in preopens) {
+      var type = __WASI_FILETYPE_DIRECTORY;
+      rightsBase = __WASI_RIGHTS_PATH_CREATE_FILE | __WASI_RIGHTS_PATH_OPEN;
+      rightsInheriting = __WASI_RIGHTS_FD_READ | __WASI_RIGHTS_FD_WRITE;
+    } else
+#endif
+    {
+#if SYSCALLS_REQUIRE_FILESYSTEM
+      var stream = SYSCALLS.getStreamFromFD(fd);
+      // All character devices are terminals (other things a Linux system would
+      // assume is a character device, like the mouse, we have special APIs for).
+      var type = stream.tty ? __WASI_FILETYPE_CHARACTER_DEVICE :
+                 FS.isDir(stream.mode) ? __WASI_FILETYPE_DIRECTORY :
+                 FS.isLink(stream.mode) ? __WASI_FILETYPE_SYMBOLIC_LINK :
+                 __WASI_FILETYPE_REGULAR_FILE;
+#else
+      // Hack to support printf in SYSCALLS_REQUIRE_FILESYSTEM=0. We support at
+      // least stdin, stdout, stderr in a simple way.
+#if ASSERTIONS
+      assert(fd == 0 || fd == 1 || fd == 2);
+#endif
+      var type = __WASI_FILETYPE_CHARACTER_DEVICE;
+      if (fd == 0) {
+        rightsBase = __WASI_RIGHTS_FD_READ;
+      } else if (fd == 1 || fd == 2) {
+        rightsBase = __WASI_RIGHTS_FD_WRITE;
+      }
+      flags = __WASI_FDFLAGS_APPEND;
+#endif
+    }
+    {{{ makeSetValue('pbuf', C_STRUCTS.__wasi_fdstat_t.fs_filetype, 'type', 'i8') }}};
+    {{{ makeSetValue('pbuf', C_STRUCTS.__wasi_fdstat_t.fs_flags, 'flags', 'i16') }}};
+    {{{ makeSetValue('pbuf', C_STRUCTS.__wasi_fdstat_t.fs_rights_base, 'rightsBase', 'i64') }}};
+    {{{ makeSetValue('pbuf', C_STRUCTS.__wasi_fdstat_t.fs_rights_inheriting, 'rightsInheriting', 'i64') }}};
+    return 0;
+  },
+
+#if SYSCALLS_REQUIRE_FILESYSTEM
+  fd_sync__async: 'auto',
+  fd_sync: (fd) => {
+    var stream = SYSCALLS.getStreamFromFD(fd);
+    var rtn = stream.stream_ops?.fsync?.(stream);
+#if ASYNCIFY || PTHREADS
+    return new Promise((resolve) => {
+      var mount = stream.node.mount;
+      if (mount?.type.syncfs) {
+        mount.type.syncfs(mount, false, (err) => resolve(err ? EIO : 0));
+      } else {
+        resolve(rtn);
+      }
+    });
+#else
+    return rtn;
+#endif // ASYNCIFY || PTHREADS
+  },
+#else // SYSCALLS_REQUIRE_FILESYSTEM
+  fd_sync: (fd) => {
+#if ASSERTIONS
+    abort('fd_sync called without SYSCALLS_REQUIRE_FILESYSTEM');
+#endif
+    return ENOSYS;
+  },
+#endif // SYSCALLS_REQUIRE_FILESYSTEM
+
+  // random.h
+
+  $initRandomFill: () => {
+#if ENVIRONMENT_MAY_BE_NODE && MIN_NODE_VERSION < 190000
+    // This block is not needed on v19+ since crypto.getRandomValues is builtin
+    if (ENVIRONMENT_IS_NODE) {
+      var nodeCrypto = require('node:crypto');
+      return (view) => (nodeCrypto.randomFillSync(view), 0);
+    }
+#endif // ENVIRONMENT_MAY_BE_NODE && MIN_NODE_VERSION < 190000
+
+#if ENVIRONMENT_MAY_BE_SHELL
+    if (ENVIRONMENT_IS_SHELL) {
+      return (view) => {
+        if (!os.system) {
+          throw new Error('randomFill not supported on d8 unless --enable-os-system is passed');
+        }
+        const b64 = os.system('sh', ['-c', `head -c${view.byteLength} /dev/urandom | base64 --wrap=0`]);
+        view.set(base64Decode(b64));
+        return 0;
+      };
+    }
+#endif
+
+#if ENVIRONMENT_MAY_BE_AUDIO_WORKLET
+    // Audio worklets don't support crypto.getRandomValues
+    if (ENVIRONMENT_IS_AUDIO_WORKLET) { //!globalThis.crypto) {
+      return () => ENOTSUP;
+    }
+#endif
+
+#if SHARED_MEMORY
+    // like with most Web APIs, we can't use Web Crypto API directly on shared memory,
+    // so we need to create an intermediate buffer and copy it to the destination
+    return (view) => (view.set(crypto.getRandomValues(new Uint8Array(view.byteLength))), 0);
+#else
+    return (view) => (crypto.getRandomValues(view), 0);
+#endif
+  },
+
+  // Lazily init on the first invocation.
+  $randomFill: (view) => (randomFill = initRandomFill())(view),
+
+  random_get__proxy: 'none',
+  random_get__nothrow: true,
+  random_get: (buffer, size) => randomFill(HEAPU8.subarray(buffer, buffer + size)),
+};
+
+for (const name of Object.keys(WasiLibrary)) {
+  wrapSyscallFunction(name, WasiLibrary, true);
+}
+
+addToLibrary(WasiLibrary);

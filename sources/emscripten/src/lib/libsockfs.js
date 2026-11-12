@@ -1,0 +1,861 @@
+/**
+ * @license
+ * Copyright 2013 The Emscripten Authors
+ * SPDX-License-Identifier: MIT
+ */
+
+addToLibrary({
+  $SOCKFS__postset: () => {
+    addAtInit('SOCKFS.root = FS.mount(SOCKFS, {}, null);');
+  },
+  $SOCKFS: {
+#if expectToReceiveOnModule('websocket')
+    websocketArgs: {},
+#endif
+    callbacks: {},
+    on(event, callback) {
+      SOCKFS.callbacks[event] = callback;
+    },
+    emit(event, param) {
+      SOCKFS.callbacks[event]?.(param);
+      // Bridge socket readiness into the inode wait-queue (poll/epoll). The
+      // 'error' event carries [fd, ...]; the rest carry the fd directly.
+      var fd = event === 'error' ? param[0] : param;
+      var flags = {
+        'message':    POLLRDNORM | POLLIN,
+        'open':       POLLOUT,
+        'connection': POLLRDNORM | POLLIN,
+        'close':      POLLIN | POLLHUP,
+        'error':      POLLERR,
+      }[event];
+      // 'listen' has no readiness mapping; skip it.
+      if (flags) FS.getStream(fd)?.node.notifyListeners(flags);
+    },
+    mount(mount) {
+#if expectToReceiveOnModule('websocket')
+      // The incoming Module['websocket'] can be used for configuring 
+      // subprotocol/url, etc
+      SOCKFS.websocketArgs = {{{ makeModuleReceiveExpr('websocket', '{}') }}};
+      // Add the Event registration mechanism to the exported websocket configuration
+      // object so we can register network callbacks from native JavaScript too.
+      // For more documentation see system/include/emscripten/emscripten.h
+      (Module['websocket'] ??= {})['on'] = SOCKFS.on;
+#endif
+
+#if SOCKET_DEBUG
+      // If debug is enabled register simple default logging callbacks for each Event.
+      SOCKFS.on('error', (error) => dbg(`websocket: error ${error}`));
+      SOCKFS.on('open', (fd) => dbg(`websocket: open fd = ${fd}`));
+      SOCKFS.on('listen', (fd) => dbg(`websocket: listen fd = ${fd}`));
+      SOCKFS.on('connection', (fd) => dbg(`websocket: connection fd = ${fd}`));
+      SOCKFS.on('message', (fd) => dbg(`websocket: message fd = ${fd}`));
+      SOCKFS.on('close', (fd) => dbg(`websocket: close fd = ${fd}`));
+#endif
+
+      return FS.createNode(null, '/', S_IFDIR | 0o777, 0);
+    },
+    createSocket(family, type, protocol) {
+      if (family != AF_INET
+#if NODERAWSOCKETS
+          // The node:net backend supports IPv6; other backends are IPv4 only.
+          && family != AF_INET6
+#if NODERAWFS
+          // AF_UNIX stream sockets are backed by node's named pipes, and their
+          // paths live in the host filesystem. That only stays coherent with the
+          // program's own file syscalls (bind's parent dir, getsockname, unlink)
+          // under NODERAWFS, so the family is gated behind it - MEMFS paths are a
+          // disjoint namespace and would fail confusingly.
+          && family != AF_UNIX
+#endif
+#endif
+         ) {
+        throw new FS.ErrnoError(EAFNOSUPPORT);
+      }
+      var flags = O_RDWR;
+#if NODERAWSOCKETS
+      if (type & SOCK_NONBLOCK) flags |= O_NONBLOCK;
+#endif
+      type &= ~(SOCK_CLOEXEC | SOCK_NONBLOCK); // SOCK_CLOEXEC makes no sense for a single process.
+      // Emscripten only supports SOCK_STREAM and SOCK_DGRAM
+      if (type != SOCK_STREAM && type != SOCK_DGRAM) {
+        throw new FS.ErrnoError(EINVAL);
+      }
+#if NODERAWSOCKETS && NODERAWFS
+      // node has no AF_UNIX datagram primitive; only stream unix sockets exist.
+      if (family == AF_UNIX && type != SOCK_STREAM) {
+        throw new FS.ErrnoError(EPROTONOSUPPORT);
+      }
+#endif
+      var streaming = type == SOCK_STREAM;
+      // The IPPROTO_TCP protocol guard only applies to INET stream sockets; unix
+      // stream sockets use protocol 0.
+      if (streaming && protocol && protocol != IPPROTO_TCP
+#if NODERAWSOCKETS && NODERAWFS
+          && family != AF_UNIX
+#endif
+         ) {
+        throw new FS.ErrnoError(EPROTONOSUPPORT); // if SOCK_STREAM, must be tcp or 0.
+      }
+
+      // create our internal socket structure
+      var sock = {
+        family,
+        type,
+        protocol,
+        server: null,
+        error: null, // Used in getsockopt for SOL_SOCKET/SO_ERROR test
+        peers: new Map(),
+        pending: [],
+        recv_queue: [],
+#if NODERAWSOCKETS
+        sock_ops: nodeSockOps
+#else
+        sock_ops: SOCKFS.websocket_sock_ops
+#endif
+      };
+
+      // create the filesystem node to store the socket structure
+      var name = SOCKFS.nextname();
+      var node = FS.createNode(SOCKFS.root, name, S_IFSOCK, 0);
+      node.sock = sock;
+
+      // and the wrapping stream that enables library functions such
+      // as read and write to indirectly interact with the socket
+      var stream = FS.createStream({
+        path: name,
+        node,
+        flags,
+        seekable: false,
+        stream_ops: SOCKFS.stream_ops
+      });
+
+      // map the new stream to the socket structure (sockets have a 1:1
+      // relationship with a stream)
+      sock.stream = stream;
+
+      return sock;
+    },
+    getSocket(fd) {
+      var stream = FS.getStream(fd);
+      if (!stream || !FS.isSocket(stream.node.mode)) {
+        return null;
+      }
+      return stream.node.sock;
+    },
+    // node and stream ops are backend agnostic
+    stream_ops: {
+      getattr(stream) {
+        var node = stream.node;
+        return {
+          dev: 1,
+          ino: node.id,
+          mode: S_IFSOCK | 0o777,
+          nlink: 1,
+          uid: 0,
+          gid: 0,
+          rdev: 0,
+          size: 0,
+          atime: new Date(0),
+          mtime: new Date(0),
+          ctime: new Date(0),
+          blksize: 4096,
+          blocks: 0,
+        };
+      },
+      poll(stream) {
+        var sock = stream.node.sock;
+        return sock.sock_ops.poll(sock);
+      },
+      ioctl(stream, request, varargs) {
+        var sock = stream.node.sock;
+        return sock.sock_ops.ioctl(sock, request, varargs);
+      },
+      read(stream, buffer, offset, length, position /* ignored */) {
+        var sock = stream.node.sock;
+        var msg = sock.sock_ops.recvmsg(sock, length);
+        if (!msg) {
+          // socket is closed
+          return 0;
+        }
+        buffer.set(msg.buffer, offset);
+        return msg.buffer.length;
+      },
+      write(stream, buffer, offset, length, position /* ignored */) {
+        var sock = stream.node.sock;
+        return sock.sock_ops.sendmsg(sock, buffer, offset, length);
+      },
+      close(stream) {
+        var sock = stream.node.sock;
+        sock.sock_ops.close(sock);
+      }
+    },
+    nextname() {
+      if (!SOCKFS.nextname.current) {
+        SOCKFS.nextname.current = 0;
+      }
+      return `socket[${SOCKFS.nextname.current++}]`;
+    },
+    // backend-specific stream ops
+    websocket_sock_ops: {
+      //
+      // peers are a small wrapper around a WebSocket to help in
+      // emulating dgram sockets
+      //
+      // these functions aren't actually sock_ops members, but we're
+      // abusing the namespace to organize them
+      //
+      createPeer(sock, addr, port = undefined) {
+        var ws;
+
+        if (typeof addr === 'object') {
+          ws = addr;
+          addr = null;
+          port = null;
+        }
+
+        if (ws) {
+          // for sockets that've already connected (e.g. we're the server)
+          // we can inspect the _socket property for the address
+          if (ws._socket) {
+            addr = ws._socket.remoteAddress;
+            port = ws._socket.remotePort;
+          }
+          // if we're just now initializing a connection to the remote,
+          // inspect the url property
+          else {
+            var result = /ws[s]?:\/\/([^:]+):(\d+)/.exec(ws.url);
+            if (!result) {
+              throw new Error('WebSocket URL must be in the format ws(s)://address:port');
+            }
+            addr = result[1];
+            port = parseInt(result[2], 10);
+          }
+        } else {
+          // create the actual websocket object and connect
+          try {
+            // The default value is 'ws://' the replace is needed because the compiler replaces '//' comments with '#'
+            // comments without checking context, so we'd end up with ws:#, the replace swaps the '#' for '//' again.
+            var url = '{{{ WEBSOCKET_URL }}}'.replace('#', '//');
+            // Make the WebSocket subprotocol (Sec-WebSocket-Protocol) default to binary if no configuration is set.
+            var subProtocols = '{{{ WEBSOCKET_SUBPROTOCOL }}}'; // The default value is 'binary'
+            // The default WebSocket options
+            var opts = undefined;
+
+#if expectToReceiveOnModule('websocket')
+            // Fetch runtime WebSocket URL config.
+            if (SOCKFS.websocketArgs['url']) {
+              url = SOCKFS.websocketArgs['url'];
+            }
+            // Fetch runtime WebSocket subprotocol config.
+            if (SOCKFS.websocketArgs['subprotocol']) {
+              subProtocols = SOCKFS.websocketArgs['subprotocol'];
+            } else if (SOCKFS.websocketArgs['subprotocol'] === null) {
+              subProtocols = 'null'
+            }
+#endif
+
+            if (url === 'ws://' || url === 'wss://') { // Is the supplied URL config just a prefix, if so complete it.
+              var parts = addr.split('/');
+              url = url + parts[0] + ':' + port + '/' + parts.slice(1).join('/');
+            }
+
+            if (subProtocols !== 'null') {
+              // The regex trims the string (removes spaces at the beginning and end), then splits the string by
+              // <any space>,<any space> into an Array. Whitespace removal is important for Websockify and ws.
+              subProtocols = subProtocols.replace(/^ +| +$/g,'').split(/ *, */);
+
+              opts = subProtocols;
+            }
+
+#if SOCKET_DEBUG
+            dbg(`websocket: connect: ${url}, ${subProtocols.toString()}`);
+#endif
+            // If node we use the ws library.
+            var WebSocketConstructor;
+#if ENVIRONMENT_MAY_BE_NODE
+            if (ENVIRONMENT_IS_NODE) {
+              WebSocketConstructor = /** @type{(typeof WebSocket)} */(require('ws'));
+            } else
+#endif // ENVIRONMENT_MAY_BE_NODE
+            {
+              WebSocketConstructor = WebSocket;
+            }
+            ws = new WebSocketConstructor(url, opts);
+            ws.binaryType = 'arraybuffer';
+          } catch (e) {
+#if SOCKET_DEBUG
+            dbg(`websocket: error connecting: ${e}`);
+#endif
+            throw new FS.ErrnoError(EHOSTUNREACH);
+          }
+        }
+
+#if SOCKET_DEBUG
+        dbg(`websocket: adding peer: ${addr}:${port}`);
+#endif
+
+        var peer = {
+          addr,
+          port,
+          socket: ws,
+          msg_send_queue: []
+        };
+
+        SOCKFS.websocket_sock_ops.addPeer(sock, peer);
+        SOCKFS.websocket_sock_ops.handlePeerEvents(sock, peer);
+
+        // if this is a bound dgram socket, send the port number first to allow
+        // us to override the ephemeral port reported to us by remotePort on the
+        // remote end.
+        if (sock.type === SOCK_DGRAM && typeof sock.sport !== 'undefined') {
+#if SOCKET_DEBUG
+          dbg(`websocket: queuing port message (port ${sock.sport})`);
+#endif
+          peer.msg_send_queue.push(new Uint8Array([
+              255, 255, 255, 255,
+              'p'.charCodeAt(0), 'o'.charCodeAt(0), 'r'.charCodeAt(0), 't'.charCodeAt(0),
+              ((sock.sport & 0xff00) >> 8) , (sock.sport & 0xff)
+          ]));
+        }
+
+        return peer;
+      },
+      getPeer(sock, addr, port) {
+        return sock.peers.get(addr + ':' + port);
+      },
+      addPeer(sock, peer) {
+        sock.peers.set(peer.addr + ':' + peer.port, peer);
+      },
+      removePeer(sock, peer) {
+        sock.peers.delete(peer.addr + ':' + peer.port);
+      },
+      handlePeerEvents(sock, peer) {
+        var first = true;
+
+        function handleOpen() {
+#if SOCKET_DEBUG
+          dbg('websocket: handle open');
+#endif
+
+          sock.connecting = false;
+          SOCKFS.emit('open', sock.stream.fd);
+
+          try {
+            var queued = peer.msg_send_queue.shift();
+            while (queued) {
+#if SOCKET_DEBUG
+              dbg(`websocket: sending queued data (${queued.byteLength} bytes): ${new Uint8Array(queued)}`);
+#endif
+              peer.socket.send(queued);
+              queued = peer.msg_send_queue.shift();
+            }
+          } catch (e) {
+            // not much we can do here in the way of proper error handling as we've already
+            // lied and said this data was sent. shut it down.
+            peer.socket.close();
+          }
+        }
+
+        function handleMessage(data) {
+          if (typeof data === 'string') {
+            var encoder = new TextEncoder(); // should be utf-8
+            data = encoder.encode(data); // make a typed array from the string
+          } else {
+#if ASSERTIONS
+            assert(data.byteLength !== undefined); // must receive an ArrayBuffer
+#endif
+            if (data.byteLength == 0) {
+              // An empty ArrayBuffer will emit a pseudo disconnect event
+              // as recv/recvmsg will return zero which indicates that a socket
+              // has performed a shutdown although the connection has not been disconnected yet.
+              return;
+            }
+            data = new Uint8Array(data); // make a typed array view on the array buffer
+          }
+
+#if SOCKET_DEBUG
+          dbg(`websocket: handle message (${data.byteLength} bytes): ${data}`);
+#endif
+
+          // if this is the port message, override the peer's port with it
+          var wasfirst = first;
+          first = false;
+          if (wasfirst &&
+              data.length === 10 &&
+              data[0] === 255 && data[1] === 255 && data[2] === 255 && data[3] === 255 &&
+              data[4] === 'p'.charCodeAt(0) && data[5] === 'o'.charCodeAt(0) && data[6] === 'r'.charCodeAt(0) && data[7] === 't'.charCodeAt(0)) {
+            // update the peer's port and its key in the peer map
+            var newport = ((data[8] << 8) | data[9]);
+            SOCKFS.websocket_sock_ops.removePeer(sock, peer);
+            peer.port = newport;
+            SOCKFS.websocket_sock_ops.addPeer(sock, peer);
+            return;
+          }
+
+          sock.recv_queue.push({ addr: peer.addr, port: peer.port, data: data });
+          SOCKFS.emit('message', sock.stream.fd);
+        }
+
+#if ENVIRONMENT_MAY_BE_NODE
+        if (ENVIRONMENT_IS_NODE) {
+           // EventEmitter-style events use by ws library objects in Node.js).
+          peer.socket.on('open', handleOpen);
+          peer.socket.on('message', (data, isBinary) => {
+            if (!isBinary) {
+              return;
+            }
+            handleMessage((new Uint8Array(data)).buffer); // copy from node Buffer -> ArrayBuffer
+          });
+          peer.socket.on('close', () => SOCKFS.emit('close', sock.stream.fd));
+          peer.socket.on('error', (error) =>{
+            // Although the ws library may pass errors that may be more descriptive than
+            // ECONNREFUSED they are not necessarily the expected error code e.g.
+            // ENOTFOUND on getaddrinfo seems to be node.js specific, so using ECONNREFUSED
+            // is still probably the most useful thing to do.
+            sock.error = ECONNREFUSED; // Used in getsockopt for SOL_SOCKET/SO_ERROR test.
+            SOCKFS.emit('error', [sock.stream.fd, sock.error, 'ECONNREFUSED: Connection refused']);
+          });
+          return;
+        }
+#endif
+        peer.socket.onopen = handleOpen;
+        peer.socket.onclose = () => SOCKFS.emit('close', sock.stream.fd);
+        peer.socket.onmessage = (event) => handleMessage(event.data);
+        peer.socket.onerror = (error) => {
+          // The WebSocket spec only allows a 'simple event' to be thrown on error,
+          // so we only really know as much as ECONNREFUSED.
+          sock.error = ECONNREFUSED; // Used in getsockopt for SOL_SOCKET/SO_ERROR test.
+          SOCKFS.emit('error', [sock.stream.fd, sock.error, 'ECONNREFUSED: Connection refused']);
+        };
+      },
+
+      //
+      // actual sock ops
+      //
+      poll(sock) {
+        if (sock.type === SOCK_STREAM && (sock.server || sock.listening)) {
+          if (sock.error) {
+            return POLLERR;
+          }
+          if (!sock.server) {
+            return POLLHUP;
+          }
+          // listen sockets should only say they're available for reading
+          // if there are pending clients.
+          return sock.pending.length ? (POLLRDNORM | POLLIN) : 0;
+        }
+
+        var mask = 0;
+        if (sock.error) {
+          mask |= POLLERR;
+        }
+        var dest = sock.type === SOCK_STREAM ?  // we only care about the socket state for connection-based sockets
+          SOCKFS.websocket_sock_ops.getPeer(sock, sock.daddr, sock.dport) :
+          null;
+
+        if (sock.recv_queue.length ||
+            !dest ||  // connection-less sockets are always ready to read
+            (dest && dest.socket.readyState === dest.socket.CLOSING) ||
+            (dest && dest.socket.readyState === dest.socket.CLOSED)) {  // let recv return 0 once closed
+          mask |= (POLLRDNORM | POLLIN);
+        }
+
+        if (!dest ||  // connection-less sockets are always ready to write
+            (dest && dest.socket.readyState === dest.socket.OPEN)) {
+          mask |= POLLOUT;
+        }
+
+        if ((dest && dest.socket.readyState === dest.socket.CLOSING) ||
+            (dest && dest.socket.readyState === dest.socket.CLOSED)) {
+          // When an non-blocking connect fails mark the socket as writable.
+          // Its up to the calling code to then use getsockopt with SO_ERROR to
+          // retrieve the error.
+          // See https://man7.org/linux/man-pages/man2/connect.2.html
+          if (sock.connecting) {
+            mask |= POLLOUT;
+          } else  {
+            // A closed peer is both a full hangup and a read-side hangup.
+            mask |= POLLHUP | POLLRDHUP;
+          }
+        }
+
+        return mask;
+      },
+      ioctl(sock, request, arg) {
+        switch (request) {
+          case FIONREAD:
+            var bytes = 0;
+            if (sock.recv_queue.length) {
+              bytes = sock.recv_queue[0].data.length;
+            }
+            {{{ makeSetValue('arg', '0', 'bytes', 'i32') }}};
+            return 0;
+          case FIONBIO:
+            var on = {{{ makeGetValue('arg', '0', 'i32') }}};
+            if (on) {
+              sock.stream.flags |= O_NONBLOCK;
+            } else {
+              sock.stream.flags &= ~O_NONBLOCK;
+            }
+            return 0;
+          default:
+            return EINVAL;
+        }
+      },
+      close(sock) {
+        sock.listening = false;
+        // if we've spawned a listen server, close it
+        if (sock.server) {
+          try {
+            sock.server.close();
+          } catch (e) {
+          }
+          sock.server = null;
+        }
+        // close any peer connections
+        for (var peer of sock.peers.values()) {
+          try {
+            peer.socket.close();
+          } catch (e) {
+          }
+        }
+        sock.peers.clear();
+        return 0;
+      },
+      bind(sock, addr, port) {
+        if (typeof sock.saddr !== 'undefined' || typeof sock.sport !== 'undefined') {
+          throw new FS.ErrnoError(EINVAL);  // already bound
+        }
+        sock.saddr = addr;
+        sock.sport = port;
+        // in order to emulate dgram sockets, we need to launch a listen server when
+        // binding on a connection-less socket
+        // note: this is only required on the server side
+        if (sock.type === SOCK_DGRAM) {
+          // close the existing server if it exists
+          if (sock.server) {
+            sock.server.close();
+            sock.server = null;
+          }
+          // swallow error operation not supported error that occurs when binding in the
+          // browser where this isn't supported
+          try {
+            sock.sock_ops.listen(sock, 0);
+          } catch (e) {
+            if (!(e.name === 'ErrnoError')) throw e;
+            if (e.errno !== EOPNOTSUPP) throw e;
+          }
+        }
+      },
+      connect(sock, addr, port) {
+        if (sock.server) {
+          throw new FS.ErrnoError(EOPNOTSUPP);
+        }
+
+        // TODO autobind
+        // if (!sock.addr && sock.type == SOCK_DGRAM) {
+        // }
+
+        // early out if we're already connected / in the middle of connecting
+        if (typeof sock.daddr !== 'undefined' && typeof sock.dport !== 'undefined') {
+          var dest = SOCKFS.websocket_sock_ops.getPeer(sock, sock.daddr, sock.dport);
+          if (dest) {
+            if (dest.socket.readyState === dest.socket.CONNECTING) {
+              throw new FS.ErrnoError(EALREADY);
+            } else {
+              throw new FS.ErrnoError(EISCONN);
+            }
+          }
+        }
+
+        // add the socket to our peer list and set our
+        // destination address / port to match
+        var peer = SOCKFS.websocket_sock_ops.createPeer(sock, addr, port);
+        sock.daddr = peer.addr;
+        sock.dport = peer.port;
+
+        // because we cannot synchronously block to wait for the WebSocket
+        // connection to complete, we return here pretending that the connection
+        // was a success.
+        sock.connecting = true;
+      },
+      listen(sock, backlog) {
+        if (!ENVIRONMENT_IS_NODE) {
+          throw new FS.ErrnoError(EOPNOTSUPP);
+        }
+#if ENVIRONMENT_MAY_BE_NODE
+        if (sock.server || sock.listening) {
+           throw new FS.ErrnoError(EINVAL);  // already listening
+        }
+        var WebSocketServer = require('ws').Server;
+        var host = sock.saddr;
+#if SOCKET_DEBUG
+        dbg(`websocket: listen: ${host}:${sock.sport}`);
+#endif
+        sock.server = new WebSocketServer({
+          host,
+          port: sock.sport
+          // TODO support backlog
+        });
+        sock.listening = true;
+        SOCKFS.emit('listen', sock.stream.fd); // Send Event with listen fd.
+
+        sock.server.on('connection', (ws) => {
+#if SOCKET_DEBUG
+          dbg(`websocket: received connection from: ${ws._socket.remoteAddress}:${ws._socket.remotePort}`);
+#endif
+          if (sock.type === SOCK_STREAM) {
+            var newsock = SOCKFS.createSocket(sock.family, sock.type, sock.protocol);
+
+            // create a peer on the new socket
+            var peer = SOCKFS.websocket_sock_ops.createPeer(newsock, ws);
+            newsock.daddr = peer.addr;
+            newsock.dport = peer.port;
+
+            // push to queue for accept to pick up
+            sock.pending.push(newsock);
+            SOCKFS.emit('connection', newsock.stream.fd);
+            // A queued client makes the listening socket readable (POLLIN).
+            sock.stream.node.notifyListeners(POLLRDNORM | POLLIN);
+          } else {
+            // create a peer on the listen socket so calling sendto
+            // with the listen socket and an address will resolve
+            // to the correct client
+            SOCKFS.websocket_sock_ops.createPeer(sock, ws);
+            SOCKFS.emit('connection', sock.stream.fd);
+          }
+        });
+        sock.server.on('close', () => {
+          SOCKFS.emit('close', sock.stream.fd);
+          sock.server = null;
+        });
+        sock.server.on('error', (error) => {
+#if SOCKET_DEBUG
+          dbg(`websocket: server error on ${host}:${sock.sport}: ${error.message || error}`);
+#endif
+          sock.error = (error.code && ERRNO_CODES[error.code]) || EIO;
+          SOCKFS.emit('error', [sock.stream.fd, sock.error, error.message || error.code || 'Server error']);
+          if (sock.server) {
+            try {
+              sock.server.close();
+            } catch (e) {
+            }
+            sock.server = null;
+          }
+          // don't throw
+        });
+#endif // ENVIRONMENT_MAY_BE_NODE
+      },
+      accept(listensock) {
+        if (listensock.error) {
+          var err = listensock.error;
+          listensock.error = null;
+          throw new FS.ErrnoError(err);
+        }
+        if (!listensock.server || !listensock.pending.length) {
+          throw new FS.ErrnoError(EINVAL);
+        }
+        var newsock = listensock.pending.shift();
+        newsock.stream.flags = listensock.stream.flags;
+        return newsock;
+      },
+      getname(sock, peer) {
+        var addr, port;
+        if (peer) {
+          if (sock.daddr === undefined || sock.dport === undefined) {
+            throw new FS.ErrnoError(ENOTCONN);
+          }
+          addr = sock.daddr;
+          port = sock.dport;
+        } else {
+          // TODO saddr and sport will be set for bind()'d UDP sockets, but what
+          // should we be returning for TCP sockets that've been connect()'d?
+          addr = sock.saddr || 0;
+          port = sock.sport || 0;
+        }
+        return { addr, port };
+      },
+      sendmsg(sock, buffer, offset, length, addr, port) {
+        if (sock.type === SOCK_DGRAM) {
+          // connection-less sockets will honor the message address,
+          // and otherwise fall back to the bound destination address
+          if (addr === undefined || port === undefined) {
+            addr = sock.daddr;
+            port = sock.dport;
+          }
+          // if there was no address to fall back to, error out
+          if (addr === undefined || port === undefined) {
+            throw new FS.ErrnoError(EDESTADDRREQ);
+          }
+        } else {
+          // connection-based sockets will only use the bound
+          addr = sock.daddr;
+          port = sock.dport;
+        }
+
+        // find the peer for the destination address
+        var dest = SOCKFS.websocket_sock_ops.getPeer(sock, addr, port);
+
+        // early out if not connected with a connection-based socket
+        if (sock.type === SOCK_STREAM) {
+          if (!dest || dest.socket.readyState === dest.socket.CLOSING || dest.socket.readyState === dest.socket.CLOSED) {
+            throw new FS.ErrnoError(ENOTCONN);
+#if SOCKET_DEBUG
+          } else if (dest.socket.readyState === dest.socket.CONNECTING) {
+            dbg('socket sendmsg called while socket is still connecting.');
+#endif
+          }
+        }
+
+        // create a copy of the incoming data to send, as the WebSocket API
+        // doesn't work entirely with an ArrayBufferView, it'll just send
+        // the entire underlying buffer
+        if (ArrayBuffer.isView(buffer)) {
+          offset += buffer.byteOffset;
+          buffer = buffer.buffer;
+        }
+
+        var data = buffer.slice(offset, offset + length);
+#if PTHREADS
+        // WebSockets .send() does not allow passing a SharedArrayBuffer, so
+        // clone the SharedArrayBuffer as regular ArrayBuffer before
+        // sending.
+        if (data instanceof SharedArrayBuffer) {
+          data = new Uint8Array(new Uint8Array(data)).buffer;
+        }
+#endif
+
+        // if we don't have a cached connectionless UDP datagram connection, or
+        // the TCP socket is still connecting, queue the message to be sent upon
+        // connect, and lie, saying the data was sent now.
+        if (!dest || dest.socket.readyState !== dest.socket.OPEN) {
+          // if we're not connected, open a new connection
+          if (sock.type === SOCK_DGRAM) {
+            if (!dest || dest.socket.readyState === dest.socket.CLOSING || dest.socket.readyState === dest.socket.CLOSED) {
+              dest = SOCKFS.websocket_sock_ops.createPeer(sock, addr, port);
+            }
+          }
+#if SOCKET_DEBUG
+          dbg(`websocket: queuing (${length} bytes): ${new Uint8Array(data)}`);
+#endif
+          dest.msg_send_queue.push(data);
+          return length;
+        }
+
+        try {
+#if SOCKET_DEBUG
+          dbg(`websocket: send (${length} bytes): ${new Uint8Array(data)}`);
+#endif
+          // send the actual data
+          dest.socket.send(data);
+          return length;
+        } catch (e) {
+          throw new FS.ErrnoError(EINVAL);
+        }
+      },
+      recvmsg(sock, length, flags) {
+        // http://pubs.opengroup.org/onlinepubs/7908799/xns/recvmsg.html
+        if (sock.type === SOCK_STREAM && sock.server) {
+          // tcp servers should not be recv()'ing on the listen socket
+          throw new FS.ErrnoError(ENOTCONN);
+        }
+
+        // MSG_PEEK returns the head of the queue without consuming it, so a
+        // later recv sees the same bytes and poll still reports it readable.
+        var peek = flags & MSG_PEEK;
+        var queued = sock.recv_queue[0];
+        if (!queued) {
+          if (sock.type === SOCK_STREAM) {
+            var dest = SOCKFS.websocket_sock_ops.getPeer(sock, sock.daddr, sock.dport);
+
+            if (!dest) {
+              // if we have a destination address but are not connected, error out
+              throw new FS.ErrnoError(ENOTCONN);
+            }
+            if (dest.socket.readyState === dest.socket.CLOSING || dest.socket.readyState === dest.socket.CLOSED) {
+              // return null if the socket has closed
+              return null;
+            }
+            // else, our socket is in a valid state but truly has nothing available
+            throw new FS.ErrnoError(EAGAIN);
+          }
+          throw new FS.ErrnoError(EAGAIN);
+        }
+
+        // queued.data will be an ArrayBuffer if it's unadulterated, but if it's
+        // requeued TCP data it'll be an ArrayBufferView
+        var queuedLength = queued.data.byteLength || queued.data.length;
+        var queuedOffset = queued.data.byteOffset || 0;
+        var queuedBuffer = queued.data.buffer || queued.data;
+        var bytesRead = Math.min(length, queuedLength);
+        var res = {
+          buffer: new Uint8Array(queuedBuffer, queuedOffset, bytesRead),
+          addr: queued.addr,
+          port: queued.port
+        };
+
+#if SOCKET_DEBUG
+        dbg(`websocket: read (${bytesRead} bytes): ${res.buffer}`);
+#endif
+
+        if (peek) return res;
+        sock.recv_queue.shift();
+
+        // push back any unread data for TCP connections
+        if (sock.type === SOCK_STREAM && bytesRead < queuedLength) {
+          var bytesRemaining = queuedLength - bytesRead;
+#if SOCKET_DEBUG
+          dbg(`websocket: read: put back ${bytesRemaining} bytes`);
+#endif
+          queued.data = new Uint8Array(queuedBuffer, queuedOffset + bytesRead, bytesRemaining);
+          sock.recv_queue.unshift(queued);
+        }
+
+        return res;
+      }
+    },
+  },
+
+  /*
+   * Mechanism to register handlers for the various Socket Events from C code.
+   * The registration functions are mostly variations on a theme, so we use this
+   * generic handler. Most of the callback functions take a file descriptor as a
+   * parameter, which will get passed to them by the emitting call. The error
+   * callback also takes an int representing the errno and a char* representing the
+   * error message, which we extract from the data passed to _callback and convert
+   * to a char* string before calling the registered C callback.
+   * Passing a NULL callback function to a emscripten_set_socket_*_callback call
+   * will deregister the callback registered for that Event.
+   */
+  $_setNetworkCallback: (event, userData, callback) => {
+    function _callback(data) {
+      callUserCallback(() => {
+        if (event === 'error') {
+          withStackSave(() => {
+            var msg = stringToUTF8OnStack(data[2]);
+            {{{ makeDynCall('viipp', 'callback') }}}(data[0], data[1], msg, userData);
+          });
+        } else {
+          {{{ makeDynCall('vip', 'callback') }}}(data, userData);
+        }
+      });
+    };
+
+    // FIXME(sbc): This has no corresponding Pop so will currently keep the
+    // runtime alive indefinitely.
+    {{{ runtimeKeepalivePush() }}}
+    SOCKFS.on(event, callback ? _callback : null);
+  },
+  emscripten_set_socket_error_callback: (userData, callback) =>
+    _setNetworkCallback('error', userData, callback),
+  emscripten_set_socket_open_callback: (userData, callback) =>
+    _setNetworkCallback('open', userData, callback),
+  emscripten_set_socket_listen_callback: (userData, callback) =>
+    _setNetworkCallback('listen', userData, callback),
+  emscripten_set_socket_connection_callback: (userData, callback) =>
+    _setNetworkCallback('connection', userData, callback),
+  emscripten_set_socket_message_callback: (userData, callback) =>
+    _setNetworkCallback('message', userData, callback),
+  emscripten_set_socket_close_callback: (userData, callback) =>
+    _setNetworkCallback('close', userData, callback),
+});
