@@ -1,0 +1,23 @@
+{
+  "component": "binutils",
+  "platform": "ubuntu-24.04-arm64",
+  "artifact_id": 13918553238,
+  "artifact_created_at": "2026-11-12T05:45:49Z",
+  "artifact_digest": "sha256:c935007be9d483abde45f50958cd52c45265dc501fdbfff595f2716e35dfb684",
+  "run_id": 43163341859,
+  "run_url": "https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43163341859",
+  "source_commit": "6765e7b071215c4bd3577ad41fb7b008cc5a6be4",
+  "archive": {
+    "name": "binutils-ubuntu-24.04-arm64.tar.xz",
+    "size": 10053624,
+    "sha256": "8ff1673e508366b7e3e34880a8807a367d4d9b3ec8e97224b19fae48bcb70720"
+  },
+  "files": [
+    {
+      "name": "binutils-ubuntu-24.04-arm64.tar.xz",
+      "size": 10053624,
+      "sha256": "8ff1673e508366b7e3e34880a8807a367d4d9b3ec8e97224b19fae48bcb70720"
+    }
+  ],
+  "stored_at": "2026-11-12T07:48:12.753134+00:00"
+}
