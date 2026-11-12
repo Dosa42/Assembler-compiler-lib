@@ -285,7 +285,87 @@
       ],
       "imported_at": "2026-11-12T07:33:04.154180+00:00",
       "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
+    },
+    {
+      "upstream_tree": "71c58d9ab71e63597641eae6a9f83614e5d49aa0",
+      "tree": "ec7adcbb85f29cb6d27ddb8d1e2c35163f933c52",
+      "file_count": 4344,
+      "submodules": [
+        {
+          "path": "third_party/gtest",
+          "url": "https://github.com/google/googletest",
+          "commit": "15460959cbbfa20e66ef0b5ab497367e47fc0a04",
+          "upstream_tree": "d02bc9a2e5877bc93118a4c0bc2ce129499d6685",
+          "tree": "d02bc9a2e5877bc93118a4c0bc2ce129499d6685",
+          "file_count": 242
+        },
+        {
+          "path": "third_party/picosha2",
+          "url": "https://github.com/okdshin/PicoSHA2",
+          "commit": "27fcf6979298949e8a462e16d09a0351c18fcaf2",
+          "upstream_tree": "ecd0dc540d5e79c22091cd0e7d17c2698313a1b8",
+          "tree": "ecd0dc540d5e79c22091cd0e7d17c2698313a1b8",
+          "file_count": 9
+        },
+        {
+          "path": "third_party/ply",
+          "url": "https://github.com/dabeaz/ply",
+          "commit": "d776a2ece6c12bf8f8b6a0e65b48546ac6078765",
+          "upstream_tree": "d5c28dfce00f1f54b6c7cad852317339774fe0aa",
+          "tree": "d5c28dfce00f1f54b6c7cad852317339774fe0aa",
+          "file_count": 170
+        },
+        {
+          "path": "third_party/simde",
+          "url": "https://github.com/simd-everywhere/simde",
+          "commit": "c86a433df3086512b0b12240defa9d9ddcc9decf",
+          "upstream_tree": "9ca4babe15882fb9e9d6adc75b9c9e70cfa1d117",
+          "tree": "2202edb4ad4891831476ac892ed3cd6ed3306a84",
+          "file_count": 1461
+        },
+        {
+          "path": "third_party/simde/test/munit",
+          "url": "https://github.com/nemequ/munit.git",
+          "commit": "da8f73412998e4f1adf1100dc187533a51af77fd",
+          "upstream_tree": "abcefac57595af6cb90c2df18292ae09a7d1468a",
+          "tree": "abcefac57595af6cb90c2df18292ae09a7d1468a",
+          "file_count": 11
+        },
+        {
+          "path": "third_party/testsuite",
+          "url": "https://github.com/WebAssembly/testsuite",
+          "commit": "d76759e746f3564a03f6106ae19679742f2a1831",
+          "upstream_tree": "b4526ad5a05ac94f64c0d7bc9cc756357d00a156",
+          "tree": "b4526ad5a05ac94f64c0d7bc9cc756357d00a156",
+          "file_count": 452
+        },
+        {
+          "path": "third_party/uvwasi",
+          "url": "https://github.com/nodejs/uvwasi",
+          "commit": "55eff19f4c7e69ec151424a037f951e0ad006ed6",
+          "upstream_tree": "c4a57f18b7a77a00a9245c154eb20758b11cb804",
+          "tree": "c4a57f18b7a77a00a9245c154eb20758b11cb804",
+          "file_count": 42
+        },
+        {
+          "path": "third_party/wasm-c-api",
+          "url": "https://github.com/WebAssembly/wasm-c-api",
+          "commit": "b6dd1fb658a282c64b029867845bc50ae59e1497",
+          "upstream_tree": "39134c9831e463132402a029c77321ed7dc3ebfd",
+          "tree": "39134c9831e463132402a029c77321ed7dc3ebfd",
+          "file_count": 66
+        }
+      ],
+      "path": "sources/wabt",
+      "url": "https://github.com/WebAssembly/wabt.git",
+      "branch": "main",
+      "commit": "4fbd7198c766e3d450edfe3847ff6f45f360e078",
+      "components": [
+        "WebAssembly Binary Toolkit"
+      ],
+      "imported_at": "2026-11-12T07:33:30.053036+00:00",
+      "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
     }
   ],
-  "updated_at": "2026-11-12T07:33:04.154196+00:00"
+  "updated_at": "2026-11-12T07:33:30.053052+00:00"
 }
