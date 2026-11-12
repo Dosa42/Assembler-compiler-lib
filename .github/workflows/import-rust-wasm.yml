@@ -56,6 +56,7 @@ jobs:
               ('emscripten', 'https://github.com/emscripten-core/emscripten.git', ['Emscripten']),
               ('emsdk', 'https://github.com/emscripten-core/emsdk.git', ['Emscripten SDK manager']),
           ]
+          fetch_mirrors = {'https://git.savannah.gnu.org/git/config.git': 'https://github.com/chipp/gnu-config.git'}
           cache = {}
           active = set()
           sequence = 0
@@ -83,9 +84,10 @@ jobs:
                   raise RuntimeError('Recursive submodule dependency: ' + url)
               active.add(identity)
               present = subprocess.run(['git', 'cat-file', '-e', commit + '^{commit}'], cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+              fetch_url = fetch_mirrors.get(url, url)
               if not present:
-                  print('Fetching ' + url + ' at ' + commit, flush=True)
-                  git('fetch', '--no-tags', '--depth=1', url, commit, capture=False)
+                  print('Fetching ' + fetch_url + ' at ' + commit + ' for upstream ' + url, flush=True)
+                  git('fetch', '--no-tags', '--depth=1', fetch_url, commit, capture=False)
               original = git('rev-parse', commit + '^{tree}').decode().strip()
               original_entries = entries(original)
               links = {path: data for path, data in original_entries.items() if data[0] == '160000'}
@@ -110,7 +112,7 @@ jobs:
                       child = expand(urls[path], data[2])
                       git('update-index', '--force-remove', '--', path, env=env)
                       git('read-tree', '--prefix=' + path + '/', child['tree'], env=env)
-                      submodules.append({'path': path, 'url': urls[path], 'commit': data[2], 'upstream_tree': child['upstream_tree'], 'tree': child['tree'], 'file_count': child['file_count']})
+                      submodules.append({'path': path, 'url': urls[path], 'commit': data[2], 'fetch_url': child['fetch_url'], 'upstream_tree': child['upstream_tree'], 'tree': child['tree'], 'file_count': child['file_count']})
                       for nested in child['submodules']:
                           submodules.append(dict(nested, path=path + '/' + nested['path']))
                   expanded = git('write-tree', env=env).decode().strip()
@@ -125,7 +127,7 @@ jobs:
                   imported = git('rev-parse', expanded + ':' + module['path']).decode().strip()
                   if imported != module['tree']:
                       raise RuntimeError('Submodule tree mismatch: ' + module['path'])
-              record = {'upstream_tree': original, 'tree': expanded, 'file_count': len(expanded_entries), 'submodules': submodules}
+              record = {'fetch_url': fetch_url, 'upstream_tree': original, 'tree': expanded, 'file_count': len(expanded_entries), 'submodules': submodules}
               active.remove(identity)
               cache[identity] = record
               print('Verified ' + url + ': ' + str(record['file_count']) + ' files, ' + str(len(submodules)) + ' expanded submodules', flush=True)
