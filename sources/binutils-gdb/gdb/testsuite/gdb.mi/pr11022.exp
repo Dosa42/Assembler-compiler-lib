@@ -1,0 +1,71 @@
+# Copyright 2009-2026 Free Software Foundation, Inc.
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+require allow_hw_watchpoint_tests
+
+load_lib mi-support.exp
+set MIFLAGS "-i=mi"
+
+standard_testfile .c
+
+if {[build_executable "failed to prepare" $testfile]} {
+    return
+}
+
+proc test_memory_changed_observer { var mi_command } {
+    with_test_prefix "${mi_command}" {
+	mi_clean_restart $::testfile
+	mi_runto_main
+
+	set line_number [gdb_get_line_number "break here"]
+	mi_gdb_test "-break-insert $::srcfile:$line_number" \
+	    {\^done,bkpt=.number="2",type="breakpoint".*\}} \
+	    "set breakpoint"
+
+	mi_gdb_test "watch $var" ".*" "set watchpoint"
+
+	mi_execute_to "exec-continue" "breakpoint-hit" "main" "" ".*" ".*" \
+	    { "" {disp="keep"} } "breakpoint hit"
+
+	set re_char {( '[^'\r\n]+')?}
+	set re_0 "0$re_char"
+	set re_1 "1$re_char"
+	set re_42 "42$re_char"
+
+	mi_execute_to "exec-continue" "watchpoint-trigger" "main" "" ".*" ".*" \
+	    [list \
+		 "" \
+		 [subst_vars \
+		      {wpt={number="3",exp="$var"},value={old="$re_0",new="$re_42"}}]] \
+	    "watchpoint hit"
+
+	mi_execute_to "exec-continue" "breakpoint-hit" "main" "" ".*" ".*" \
+	    { "" {disp="keep"} } "breakpoint hit 2"
+
+	mi_gdb_test "-${mi_command}" {\^done} "set $var"
+
+	mi_execute_to "exec-continue" "watchpoint-trigger" "main" "" ".*" ".*" \
+	    [list \
+		 "" \
+		 [subst_vars \
+		      {wpt={number="3",exp="$var"},value={old="$re_1",new="$re_42"}}]] \
+	    "watchpoint hit 2"
+
+	mi_gdb_exit
+    }
+}
+
+test_memory_changed_observer b {data-write-memory-bytes &b "01"}
+test_memory_changed_observer x {data-write-memory &x x 4 "01"}

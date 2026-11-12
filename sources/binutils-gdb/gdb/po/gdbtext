@@ -1,0 +1,62 @@
+#!/bin/sh -e
+
+if test $# -lt 3
+then
+    echo "Usage: $0 <xgettext> <package>  <directory> ..." 1>&2
+    exit 0
+fi
+
+xgettext=$1 ; shift
+package=$1 ; shift
+
+find_files ()
+{
+    for d in "$@"; do
+	(
+	    cd "$d"
+	    find -- * \
+		 -name '*-stub.c' -prune -o \
+		 -name 'testsuite' -prune -o \
+		 -name 'init.c' -prune -o \
+		 -name '*.[hc]' -print -o \
+		 -name '*.cc' -print
+	)
+    done
+}
+
+run_xgettext ()
+{
+    # Transform:
+    #   "$@" == "arg1" "arg2" ...
+    # into:
+    #   "$@" == "--directory=arg1" "--directory=arg2" ...
+    first=true
+    for d in "$@"; do
+	if $first; then
+	    # Clear "$@", before we start appending to it.
+	    set --
+	    first=false
+	fi
+
+	# Append to "$@".
+	set -- \
+	    "$@" \
+	    --directory="$d"
+    done
+
+    ${xgettext} \
+	--default-domain="${package}" \
+	--copyright-holder="Free Software Foundation, Inc." \
+	--add-comments \
+	--files-from=- \
+	--force-po \
+	--debug \
+	--language=c++ \
+	--keyword=_ \
+	--keyword=N_ \
+	"$@" \
+	-o po/"${package}".pot
+}
+
+find_files "$@" \
+    | run_xgettext "$@"

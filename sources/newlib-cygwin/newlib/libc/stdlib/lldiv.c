@@ -1,0 +1,84 @@
+/*
+FUNCTION
+<<lldiv>>---divide two long long integers
+
+INDEX
+        lldiv
+
+SYNOPSIS
+        #include <stdlib.h>
+        lldiv_t lldiv(long long <[n]>, long long <[d]>);
+
+DESCRIPTION
+Divide
+@tex
+$n/d$,
+@end tex
+@ifnottex
+<[n]>/<[d]>,
+@end ifnottex
+returning quotient and remainder as two long long integers in a structure 
+<<lldiv_t>>.
+
+RETURNS
+The result is represented with the structure
+
+. typedef struct
+. {
+.  long long quot;
+.  long long rem;
+. } lldiv_t;
+
+where the <<quot>> field represents the quotient, and <<rem>> the
+remainder.  For nonzero <[d]>, if `<<<[r]> = ldiv(<[n]>,<[d]>);>>' then
+<[n]> equals `<<<[r]>.rem + <[d]>*<[r]>.quot>>'.
+
+To divide <<long>> rather than <<long long>> values, use the similar
+function <<ldiv>>.
+
+PORTABILITY
+<<lldiv>> is ISO 9899 (C99) compatable.
+
+No supporting OS subroutines are required.
+*/
+
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2001 Mike Barcroft <mike@FreeBSD.org>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+
+#include <stdlib.h>
+
+lldiv_t
+lldiv (long long numer, long long denom)
+{
+	lldiv_t retval;
+
+	retval.quot = numer / denom;
+	retval.rem = numer % denom;
+
+	return (retval);
+}

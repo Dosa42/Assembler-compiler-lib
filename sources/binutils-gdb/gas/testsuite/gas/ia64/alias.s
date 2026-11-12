@@ -1,0 +1,11 @@
+	.section .foo,"aw","progbits"
+	.secalias .foo,"1234"
+	.secalias .foo,"1234"
+	.alias foo, "\"\100\104\""
+	.alias foo, "\"\100\104\""
+foo:
+	stringz "\"\x40\x44\""
+	.secalias .foo,"1234"
+	.secalias .foo,"1234"
+	.alias foo, "\"\x40\x44\""
+	.alias foo, "\"\x40\x44\""

@@ -1,0 +1,2181 @@
+// Copyright (C) 2026 Free Software Foundation, Inc.
+//
+// This file is part of GCC.
+
+// GCC is free software; you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free
+// Software Foundation; either version 3, or (at your option) any later
+// version.
+
+// GCC is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with GCC; see the file COPYING3.  If not see
+// <http://www.gnu.org/licenses/>.
+
+#include "rust-intrinsic-handlers.h"
+#include "optional.h"
+#include "rust-backend.h"
+#include "rust-compile-context.h"
+#include "rust-compile-item.h"
+#include "rust-compile-type.h"
+#include "rust-compile-fnparam.h"
+#include "rust-builtins.h"
+#include "rust-diagnostics.h"
+#include "rust-location.h"
+#include "rust-constexpr.h"
+#include "rust-session-manager.h"
+#include "rust-tree.h"
+#include "rust-tyty.h"
+#include "tree-core.h"
+#include "rust-gcc.h"
+#include "fold-const.h"
+#include "rust-constexpr.h"
+#include "rust-hir-item.h"
+#include "tree.h"
+
+// declaration taken from "stringpool.h"
+// the get_identifier macro causes compilation issues
+extern tree get_identifier (const char *);
+
+namespace Rust {
+namespace Compile {
+
+static tree
+lang_item_call (IntrinsicCtx &ctx, LangItem::Kind lang_item,
+		const std::vector<tree> &args)
+{
+  auto defid = ctx.get_mappings ().lookup_lang_item (lang_item);
+  rust_assert (defid);
+
+  auto lang_item_def = ctx.get_mappings ().lookup_defid (*defid);
+  rust_assert (lang_item_def);
+
+  // Let's make sure we're not calling a lang item that's a type...
+  rust_assert (lang_item_def.value ()->get_item_kind ()
+	       == HIR::Item::ItemKind::Function);
+
+  // Compile the lang item function
+  auto fn = CompileItem::compile (*lang_item_def, &ctx.ctx);
+
+  return Backend::call_expression (fn, args, nullptr, ctx.loc);
+}
+
+tree
+Intrinsic::compile (Context *ctx, TyTy::FnType *fntype, location_t loc)
+{
+  auto ictx = IntrinsicCtx (ctx, fntype, loc);
+
+  // Check for a cached version of the intrinsic
+  if (auto cached = ictx.check_for_cached_intrinsic ())
+    return *cached;
+
+  // Otherwise compile the fntype
+  ictx.compile_intrinsic_function ();
+
+  // Compile its given parameters and type parameters properly
+  ictx.compile_fn_params ();
+
+  // And enter its block
+  ictx.enter_intrinsic_block ();
+
+  // Do the inner, intrinsic specific compilation logic
+  closure (ictx);
+
+  // ...and exit its block
+  ictx.finalize_intrinsic_block ();
+
+  // Once everything has been done and the intrinsic's low level compilation
+  // logic is done, we return the compiled TREE object for the function
+  return ictx.fn;
+}
+
+static tree
+make_unsigned_long_tree (unsigned long value)
+{
+  return build_int_cst (integer_type_node, value);
+}
+
+static bool
+is_basic_integer_type (TyTy::BaseType *type)
+{
+  switch (type->get_kind ())
+    {
+    case TyTy::INT:
+    case TyTy::UINT:
+    case TyTy::USIZE:
+    case TyTy::ISIZE:
+      return true;
+    default:
+      return false;
+      break;
+    }
+}
+
+void
+IntrinsicCtx::maybe_override_ctx ()
+{
+  if (fntype.has_substitutions_defined ())
+    fntype.override_context ();
+}
+
+static bool
+check_for_basic_integer_type (const std::string &intrinsic_str,
+			      location_t locus, TyTy::BaseType *type)
+{
+  auto is_basic_integer = is_basic_integer_type (type);
+  if (!is_basic_integer)
+    {
+      rust_error_at (
+	locus,
+	"%s intrinsic can only be used with basic integer types (got %qs)",
+	intrinsic_str.c_str (), type->get_name ().c_str ());
+    }
+
+  return is_basic_integer;
+}
+
+tl::optional<tree>
+IntrinsicCtx::check_for_cached_intrinsic ()
+{
+  const Resolver::CanonicalPath &canonical_path = fntype.get_ident ().path;
+  std::string asm_name = ctx.mangle_item (&fntype, canonical_path);
+
+  tree lookup = NULL_TREE;
+
+  if (ctx.lookup_function_decl (fntype.get_ty_ref (), &lookup, fntype.get_id (),
+				&fntype, asm_name))
+    return lookup;
+
+  return tl::nullopt;
+}
+
+void
+IntrinsicCtx::compile_intrinsic_function ()
+{
+  maybe_override_ctx ();
+
+  const Resolver::CanonicalPath &canonical_path = fntype.get_ident ().path;
+
+  tree compiled_fn_type = TyTyResolveCompile::compile (&ctx, &fntype);
+  std::string ir_symbol_name
+    = canonical_path.get () + fntype.subst_as_string ();
+  std::string asm_name = ctx.mangle_item (&fntype, canonical_path);
+
+  unsigned int flags = 0;
+
+  // store the function directly in this context's fn member
+  fn = Backend::function (compiled_fn_type, ir_symbol_name, asm_name, flags,
+			  fntype.get_ident ().locus);
+
+  TREE_PUBLIC (fn) = 0;
+  TREE_READONLY (fn) = 1;
+  DECL_ARTIFICIAL (fn) = 1;
+  DECL_EXTERNAL (fn) = 0;
+  DECL_DECLARED_INLINE_P (fn) = 1;
+}
+
+void
+IntrinsicCtx::compile_fn_params ()
+{
+  for (auto &parm : fntype.get_params ())
+    {
+      auto &referenced_param = parm.get_pattern ();
+      location_t param_locus = referenced_param.get_locus ();
+
+      auto param_tyty = parm.get_type ();
+
+      auto compiled_param_type = TyTyResolveCompile::compile (&ctx, param_tyty);
+      Bvariable *compiled_param_var
+	= CompileFnParam::compile (&ctx, fn, referenced_param,
+				   compiled_param_type, param_locus);
+
+      param_vars.push_back (compiled_param_var);
+      param_types.push_back (compiled_param_type);
+    }
+
+  auto ok = Backend::function_set_parameters (fn, param_vars);
+
+  rust_assert (ok);
+}
+
+void
+IntrinsicCtx::enter_intrinsic_block ()
+{
+  tree enclosing_scope = NULL_TREE;
+  location_t start_location = UNDEF_LOCATION;
+  location_t end_location = UNDEF_LOCATION;
+
+  auto block = Backend::block (fn, enclosing_scope, block_variables,
+			       start_location, end_location);
+
+  ctx.push_block (block);
+}
+
+void
+IntrinsicCtx::finalize_intrinsic_block ()
+{
+  tree bind_tree = ctx.pop_block ();
+
+  gcc_assert (TREE_CODE (bind_tree) == BIND_EXPR);
+
+  DECL_SAVED_TREE (fn) = bind_tree;
+
+  ctx.push_function (fn);
+
+  DECL_DECLARED_CONSTEXPR_P (fn) = 1;
+  maybe_save_constexpr_fundef (fn);
+}
+
+static TyTy::BaseType *
+get_inner_dst (TyTy::BaseType *type)
+{
+  TyTy::BaseType *curr = type;
+  while (curr->get_kind () == TyTy::TypeKind::ADT)
+    {
+      auto variant = curr->as<TyTy::ADTType> ()->get_variants ().front ();
+      curr = variant->get_field_at_index (variant->num_fields () - 1)
+	       ->get_field_type ();
+    }
+  return curr;
+}
+
+namespace handlers {
+namespace inner {
+
+static tree
+resolve_atomic_builtin (IntrinsicCtx &ctx, const std::string &prefix)
+{
+  auto locus = ctx.get_mappings ().lookup_location (ctx.fntype.get_ref ());
+  auto operand_type = ctx.fntype.get_substs ()[0].get_param_ty ()->resolve ();
+
+  if (!check_for_basic_integer_type ("atomic operation", locus, operand_type))
+    return error_mark_node;
+
+  tree operand_type_tree
+    = TyTyResolveCompile::compile (ctx.inner (), operand_type);
+  if (operand_type_tree == error_mark_node)
+    return error_mark_node;
+
+  operand_type_tree = TYPE_MAIN_VARIANT (operand_type_tree);
+  if (TREE_CODE (operand_type_tree) != INTEGER_TYPE)
+    {
+      rust_error_at (locus, "atomic operation requires an integer type");
+      return error_mark_node;
+    }
+
+  HOST_WIDE_INT bytes = int_size_in_bytes (operand_type_tree);
+
+  std::string builtin_name = "__" + prefix + "_" + std::to_string (bytes);
+
+  auto decl = BuiltinsContext::get ().lookup_simple_builtin (builtin_name);
+  rust_assert (decl);
+
+  return decl.value ();
+}
+
+inline void
+unchecked_op (IntrinsicCtx &ctx, tree_code op)
+{
+  auto x = Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+  auto y = Backend::var_expression (ctx.param_vars[1], UNDEF_LOCATION);
+
+  auto *monomorphized_type
+    = ctx.fntype.get_substs ().at (0).get_param_ty ()->resolve ();
+
+  auto call_locus = ctx.get_mappings ().lookup_location (ctx.fntype.get_ref ());
+  check_for_basic_integer_type ("unchecked operation", call_locus,
+				monomorphized_type);
+
+  auto expr = build2 (op, TREE_TYPE (x), x, y);
+  auto return_statement
+    = Backend::return_statement (ctx.fn, expr, UNDEF_LOCATION);
+
+  ctx.add_statement (return_statement);
+}
+
+inline void
+expect (IntrinsicCtx &ctx, bool likely)
+{
+  tree expr = Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+  auto expect_fn_raw
+    = BuiltinsContext::get ().lookup_simple_builtin ("__builtin_expect");
+  rust_assert (expect_fn_raw);
+
+  auto expect_fn = build_fold_addr_expr_loc (BUILTINS_LOCATION, *expect_fn_raw);
+
+  // we need to convert the expression return type to long to match the expected
+  // parameter type of __builtin_expect
+  auto expect_src = build1 (CONVERT_EXPR, long_integer_type_node, expr);
+  auto expect_value
+    = make_unsigned_long_tree (static_cast<unsigned long> (likely));
+
+  auto expect_call
+    = Backend::call_expression (expect_fn, {expect_src, expect_value}, nullptr,
+				BUILTINS_LOCATION);
+  // the return value also needs to be casted (to bool)
+  auto expect_call_bool = build1 (CONVERT_EXPR, boolean_type_node, expect_call);
+  auto return_statement
+    = Backend::return_statement (ctx.fn, expect_call_bool, BUILTINS_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+void
+try_handler (IntrinsicCtx &ctx, bool is_new_api)
+{
+  // The following tricks are needed to make sure the try-catch blocks are not
+  // optimized away
+  TREE_READONLY (ctx.fn) = 0;
+  DECL_DISREGARD_INLINE_LIMITS (ctx.fn) = 1;
+  DECL_ATTRIBUTES (ctx.fn) = tree_cons (get_identifier ("always_inline"),
+					NULL_TREE, DECL_ATTRIBUTES (ctx.fn));
+
+  tree enclosing_scope = NULL_TREE;
+
+  bool panic_is_abort = Session::get_instance ().options.get_panic_strategy ()
+			== CompileOptions::PanicStrategy::Abort;
+  tree try_fn = Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+  tree user_data = Backend::var_expression (ctx.param_vars[1], UNDEF_LOCATION);
+  tree catch_fn = Backend::var_expression (ctx.param_vars[2], UNDEF_LOCATION);
+  tree normal_return_stmt = NULL_TREE;
+  tree error_return_stmt = NULL_TREE;
+  tree try_call = Backend::call_expression (try_fn, {user_data}, nullptr,
+					    BUILTINS_LOCATION);
+  tree catch_call = NULL_TREE;
+  tree try_block = Backend::block (ctx.fn, enclosing_scope, {}, UNDEF_LOCATION,
+				   UNDEF_LOCATION);
+
+  if (is_new_api)
+    {
+      auto ret_type = TyTyResolveCompile::get_unit_type (ctx.inner ());
+      auto ret_expr = Backend::constructor_expression (ret_type, false, {}, -1,
+						       UNDEF_LOCATION);
+      normal_return_stmt
+	= Backend::return_statement (ctx.fn, ret_expr, BUILTINS_LOCATION);
+      error_return_stmt
+	= Backend::return_statement (ctx.fn, ret_expr, BUILTINS_LOCATION);
+    }
+  else
+    {
+      normal_return_stmt = Backend::return_statement (ctx.fn, integer_zero_node,
+						      BUILTINS_LOCATION);
+      error_return_stmt = Backend::return_statement (ctx.fn, integer_one_node,
+						     BUILTINS_LOCATION);
+    }
+  Backend::block_add_statements (try_block,
+				 std::vector<tree>{try_call,
+						   normal_return_stmt});
+  if (panic_is_abort)
+    {
+      // skip building the try-catch construct
+      ctx.add_statement (try_block);
+
+      return;
+    }
+
+  tree eh_pointer
+    = build_call_expr (builtin_decl_explicit (BUILT_IN_EH_POINTER), 1,
+		       integer_zero_node);
+  catch_call = Backend::call_expression (catch_fn, {user_data, eh_pointer},
+					 NULL_TREE, BUILTINS_LOCATION);
+
+  tree catch_block = Backend::block (ctx.fn, enclosing_scope, {},
+				     UNDEF_LOCATION, UNDEF_LOCATION);
+  Backend::block_add_statements (catch_block,
+				 std::vector<tree>{catch_call,
+						   error_return_stmt});
+  // emulate what cc1plus is doing for C++ try-catch
+  tree inner_eh_construct
+    = Backend::exception_handler_statement (catch_call, NULL_TREE,
+					    error_return_stmt,
+					    BUILTINS_LOCATION);
+  // TODO(liushuyu): eh_personality needs to be implemented as a runtime thing
+  auto eh_construct
+    = Backend::exception_handler_statement (try_block, inner_eh_construct,
+					    NULL_TREE, BUILTINS_LOCATION);
+  ctx.add_statement (eh_construct);
+}
+
+/**
+ * pub fn wrapping_{add, sub, mul}<T>(lhs: T, rhs: T) -> T;
+ */
+void
+wrapping_op (IntrinsicCtx &ctx, tree_code op)
+{
+  // wrapping_<op> intrinsics have two parameter
+
+  auto &lhs_param = ctx.param_vars.at (0);
+  auto &rhs_param = ctx.param_vars.at (1);
+
+  auto lhs = Backend::var_expression (lhs_param, UNDEF_LOCATION);
+  auto rhs = Backend::var_expression (rhs_param, UNDEF_LOCATION);
+
+  // Operations are always wrapping in Rust, as we have -fwrapv enabled by
+  // default. The difference between a wrapping_{add, sub, mul} and a regular
+  // arithmetic operation is that these intrinsics do not panic - they always
+  // carry over.
+  auto wrap_expr = build2 (op, TREE_TYPE (lhs), lhs, rhs);
+
+  auto return_statement
+    = Backend::return_statement (ctx.fn, wrap_expr, UNDEF_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+/**
+ * pub fn add_with_overflow<T>(x: T, y: T) -> (T, bool);
+ */
+void
+op_with_overflow (IntrinsicCtx &ctx, tree_code op)
+{
+  // wrapping_<op> intrinsics have two parameter
+
+  auto &x_param = ctx.param_vars.at (0);
+  auto &y_param = ctx.param_vars.at (1);
+
+  auto &param_mapping = ctx.fntype.get_substs ().at (0);
+  const auto param_tyty = param_mapping.get_param_ty ();
+  auto resolved_tyty = param_tyty->resolve ();
+  tree template_parameter_type
+    = TyTyResolveCompile::compile (ctx.inner (), resolved_tyty);
+
+  // this should match y as well or we can take it from the TyTy structure
+  tree tmp_stmt = error_mark_node;
+  Bvariable *result_variable
+    = Backend::temporary_variable (ctx.fn, NULL_TREE, template_parameter_type,
+				   NULL_TREE, true /*address_is_taken*/,
+				   UNDEF_LOCATION, &tmp_stmt);
+  Bvariable *bool_variable
+    = Backend::temporary_variable (ctx.fn, NULL_TREE, boolean_type_node,
+				   NULL_TREE, true /*address_is_taken*/,
+				   UNDEF_LOCATION, &tmp_stmt);
+
+  ctx.set_block_variables ({result_variable, bool_variable});
+
+  auto x = Backend::var_expression (x_param, UNDEF_LOCATION);
+  auto y = Backend::var_expression (y_param, UNDEF_LOCATION);
+
+  tl::optional<tree> overflow_builtin = tl::nullopt;
+  auto &builtins = BuiltinsContext::get ();
+
+  switch (op)
+    {
+    case PLUS_EXPR:
+      overflow_builtin
+	= builtins.lookup_simple_builtin ("__builtin_add_overflow");
+      break;
+
+    case MINUS_EXPR:
+      overflow_builtin
+	= builtins.lookup_simple_builtin ("__builtin_sub_overflow");
+      break;
+
+    case MULT_EXPR:
+      overflow_builtin
+	= builtins.lookup_simple_builtin ("__builtin_mul_overflow");
+      break;
+
+    default:
+      rust_unreachable ();
+      break;
+    }
+  rust_assert (overflow_builtin);
+
+  tree bool_decl = bool_variable->get_tree (BUILTINS_LOCATION);
+  tree result_decl = result_variable->get_tree (BUILTINS_LOCATION);
+  tree result_ref = build_fold_addr_expr_loc (BUILTINS_LOCATION, result_decl);
+
+  tree builtin_call = build_call_expr_loc (BUILTINS_LOCATION, *overflow_builtin,
+					   3, x, y, result_ref);
+
+  tree overflow_assignment
+    = Backend::assignment_statement (bool_decl, builtin_call,
+				     BUILTINS_LOCATION);
+
+  ctx.add_statement (overflow_assignment);
+
+  std::vector<tree> vals = {result_decl, bool_decl};
+  tree tuple_type = TREE_TYPE (DECL_RESULT (ctx.fn));
+  tree result_expr = Backend::constructor_expression (tuple_type, false, vals,
+						      -1, UNDEF_LOCATION);
+
+  auto return_statement
+    = Backend::return_statement (ctx.fn, result_expr, UNDEF_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+/**
+ * fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize);
+ * fn copy<T>(src: *const T, dst: *mut T, count: usize);
+ */
+void
+copy (IntrinsicCtx &ctx, bool overlaps)
+{
+  // Most intrinsic functions are pure - not `copy_nonoverlapping` and `copy`
+  TREE_READONLY (ctx.fn) = 0;
+  TREE_SIDE_EFFECTS (ctx.fn) = 1;
+
+  auto src = Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+  auto dst = Backend::var_expression (ctx.param_vars[1], UNDEF_LOCATION);
+  auto count = Backend::var_expression (ctx.param_vars[2], UNDEF_LOCATION);
+
+  // We want to create the following statement
+  // memcpy(dst, src, size_of::<T>());
+  // so
+  // memcpy(dst, src, size_expr);
+
+  auto *resolved_ty
+    = ctx.fntype.get_substs ().at (0).get_param_ty ()->resolve ();
+  auto param_type = TyTyResolveCompile::compile (ctx.inner (), resolved_ty);
+
+  tree size_expr
+    = build2 (MULT_EXPR, size_type_node, TYPE_SIZE_UNIT (param_type), count);
+
+  auto memcpy_raw = BuiltinsContext::get ().lookup_simple_builtin (
+    overlaps ? "__builtin_memmove" : "__builtin_memcpy");
+  rust_assert (memcpy_raw);
+
+  auto memcpy = build_fold_addr_expr_loc (UNKNOWN_LOCATION, *memcpy_raw);
+
+  auto copy_call = Backend::call_expression (memcpy, {dst, src, size_expr},
+					     nullptr, UNDEF_LOCATION);
+
+  ctx.add_statement (copy_call);
+}
+
+// Compiles atomic_store that has the signature (*mut T, T) -> ()
+void
+atomic_store (IntrinsicCtx &ctx, int ordering)
+{
+  // Most intrinsic functions are pure but not the atomic ones
+  TREE_READONLY (ctx.fn) = 0;
+  TREE_SIDE_EFFECTS (ctx.fn) = 1;
+
+  std::vector<tree> types;
+
+  auto dst = Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+  TREE_READONLY (dst) = 0;
+
+  auto value = Backend::var_expression (ctx.param_vars[1], UNDEF_LOCATION);
+  auto memorder = make_unsigned_long_tree (ordering);
+
+  auto builtin_decl = resolve_atomic_builtin (ctx, "atomic_store");
+  if (!builtin_decl || builtin_decl == error_mark_node)
+    return;
+
+  auto atomic_store = build_fold_addr_expr_loc (UNKNOWN_LOCATION, builtin_decl);
+
+  auto store_call
+    = Backend::call_expression (atomic_store, {dst, value, memorder}, nullptr,
+				UNDEF_LOCATION);
+  TREE_READONLY (store_call) = 0;
+  TREE_SIDE_EFFECTS (store_call) = 1;
+
+  ctx.add_statement (store_call);
+}
+
+// Compiles atomic_load that has the signature (*const T) -> T
+void
+atomic_load (IntrinsicCtx &ctx, int ordering)
+{
+  // Most intrinsic functions are pure but not the atomic ones
+  // FIXME: Is atomic_load_* pure? Feels like it shouldn't so
+  TREE_READONLY (ctx.fn) = 0;
+  TREE_SIDE_EFFECTS (ctx.fn) = 1;
+
+  std::vector<tree> types;
+
+  auto src = Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+  auto memorder = make_unsigned_long_tree (ordering);
+
+  auto builtin_decl = resolve_atomic_builtin (ctx, "atomic_load");
+  if (!builtin_decl || builtin_decl == error_mark_node)
+    return;
+
+  auto atomic_load = build_fold_addr_expr_loc (UNKNOWN_LOCATION, builtin_decl);
+
+  auto load_call = Backend::call_expression (atomic_load, {src, memorder},
+					     nullptr, UNDEF_LOCATION);
+  auto return_statement
+    = Backend::return_statement (ctx.fn, load_call, UNDEF_LOCATION);
+
+  TREE_READONLY (load_call) = 0;
+  TREE_SIDE_EFFECTS (load_call) = 1;
+
+  ctx.add_statement (return_statement);
+}
+
+// Compiles for atomic builtins that have the signature (*mut T, T) -> T
+void
+atomic_binary_op (IntrinsicCtx &ctx, const std::string &op_name, int ordering)
+{
+  // Most intrinsic functions are pure but not the atomic ones
+  TREE_READONLY (ctx.fn) = 0;
+  TREE_SIDE_EFFECTS (ctx.fn) = 1;
+
+  auto dst = Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+  TREE_READONLY (dst) = 0;
+
+  auto value = Backend::var_expression (ctx.param_vars[1], UNDEF_LOCATION);
+  auto memorder = make_unsigned_long_tree (ordering);
+
+  auto builtin_decl = resolve_atomic_builtin (ctx, "atomic_" + op_name);
+
+  if (!builtin_decl || builtin_decl == error_mark_node)
+    return;
+
+  auto atomic_binary_op
+    = build_fold_addr_expr_loc (UNKNOWN_LOCATION, builtin_decl);
+
+  auto binary_op_call
+    = Backend::call_expression (atomic_binary_op, {dst, value, memorder},
+				nullptr, UNDEF_LOCATION);
+
+  TREE_READONLY (binary_op_call) = 0;
+  TREE_SIDE_EFFECTS (binary_op_call) = 1;
+
+  auto return_statement
+    = Backend::return_statement (ctx.fn, binary_op_call, UNDEF_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+// Compiles atomic compare exchange with signature (*mut T, T, T) -> (T, bool).
+void
+atomic_compare_exchange (IntrinsicCtx &ctx, bool weak, int success_ordering,
+			 int failure_ordering)
+{
+  // Most intrinsic functions are pure but not the atomic ones
+  TREE_READONLY (ctx.fn) = 0;
+  TREE_SIDE_EFFECTS (ctx.fn) = 1;
+
+  // The intrinsic block is already open, so emit the temporary declarations
+  // directly into it.
+  tree tmp_stmt = NULL_TREE;
+  Bvariable *expected_var
+    = Backend::temporary_variable (ctx.fn, NULL_TREE, ctx.param_types[1],
+				   NULL_TREE, true, UNDEF_LOCATION, &tmp_stmt);
+  ctx.add_statement (tmp_stmt);
+  Bvariable *success_var
+    = Backend::temporary_variable (ctx.fn, NULL_TREE, boolean_type_node,
+				   NULL_TREE, false, UNDEF_LOCATION, &tmp_stmt);
+  ctx.add_statement (tmp_stmt);
+
+  auto dst = Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+  TREE_READONLY (dst) = 0;
+
+  auto expected = expected_var->get_tree (UNDEF_LOCATION);
+  auto success = success_var->get_tree (UNDEF_LOCATION);
+
+  auto old_value = Backend::var_expression (ctx.param_vars[1], UNDEF_LOCATION);
+  auto new_value = Backend::var_expression (ctx.param_vars[2], UNDEF_LOCATION);
+
+  auto builtin_decl = resolve_atomic_builtin (ctx, "atomic_compare_exchange");
+
+  if (!builtin_decl || builtin_decl == error_mark_node)
+    return;
+
+  ctx.add_statement (
+    Backend::assignment_statement (expected, old_value, UNDEF_LOCATION));
+
+  auto expected_addr = build_fold_addr_expr_loc (UNDEF_LOCATION, expected);
+  auto builtin_addr = build_fold_addr_expr_loc (UNDEF_LOCATION, builtin_decl);
+  auto weak_flag = build_int_cst (boolean_type_node, weak);
+  auto success_memorder = make_unsigned_long_tree (success_ordering);
+  auto failure_memorder = make_unsigned_long_tree (failure_ordering);
+
+  auto exchange_call
+    = Backend::call_expression (builtin_addr,
+				{dst, expected_addr, new_value, weak_flag,
+				 success_memorder, failure_memorder},
+				nullptr, UNDEF_LOCATION);
+  TREE_READONLY (exchange_call) = 0;
+  TREE_SIDE_EFFECTS (exchange_call) = 1;
+
+  auto assignment_statement
+    = Backend::assignment_statement (success, exchange_call, UNDEF_LOCATION);
+  ctx.add_statement (assignment_statement);
+
+  auto tuple_type = TREE_TYPE (DECL_RESULT (ctx.fn));
+  auto result
+    = Backend::constructor_expression (tuple_type, false, {expected, success},
+				       -1, UNDEF_LOCATION);
+  auto return_statement
+    = Backend::return_statement (ctx.fn, result, UNDEF_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+// Compiles atomic min/max with signature (*mut T, T) -> T
+//
+// no gcc backend built-in equivalent, so we just do a compare-and-swap loop
+// similar to rustc_codegen_gcc & libstdc++.
+//
+// This is equivalent to the following code:
+//
+// T old_val = __atomic_load_N (dst, failure_order);
+// do
+//   {
+//     T desired = min_or_max (old_val, value);
+//     if (__atomic_compare_exchange_N (dst, &old_val, desired, true,
+//					order, failure_order))
+//	  break;
+//   } while (true);
+// return old_val;
+void
+atomic_minmax (IntrinsicCtx &ctx, AtomicMinMaxKind kind, int ordering)
+{
+  // Most intrinsic functions are pure but not the atomic ones
+  TREE_READONLY (ctx.fn) = 0;
+  TREE_SIDE_EFFECTS (ctx.fn) = 1;
+
+  auto load_decl = resolve_atomic_builtin (ctx, "atomic_load");
+  if (!load_decl || load_decl == error_mark_node)
+    return;
+  auto exchange_decl = resolve_atomic_builtin (ctx, "atomic_compare_exchange");
+  if (!exchange_decl || exchange_decl == error_mark_node)
+    return;
+
+  auto dst = Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+  TREE_READONLY (dst) = 0;
+  auto value = Backend::var_expression (ctx.param_vars[1], UNDEF_LOCATION);
+  auto value_type = ctx.param_types[1];
+
+  // release uses relaxed & acq_req uses acquire for loads on fail exchanges
+  int failure_ordering = ordering;
+  if (ordering == __ATOMIC_RELEASE)
+    failure_ordering = __ATOMIC_RELAXED;
+  else if (ordering == __ATOMIC_ACQ_REL)
+    failure_ordering = __ATOMIC_ACQUIRE;
+
+  auto failure_memorder = make_unsigned_long_tree (failure_ordering);
+  auto load_addr = build_fold_addr_expr_loc (UNDEF_LOCATION, load_decl);
+  auto load_call = Backend::call_expression (load_addr, {dst, failure_memorder},
+					     nullptr, UNDEF_LOCATION);
+  TREE_READONLY (load_call) = 0;
+  TREE_SIDE_EFFECTS (load_call) = 1;
+
+  tree tmp_stmt = NULL_TREE;
+  Bvariable *expected_var
+    = Backend::temporary_variable (ctx.fn, NULL_TREE, value_type, load_call,
+				   true, UNDEF_LOCATION, &tmp_stmt);
+  ctx.add_statement (tmp_stmt);
+  auto expected = expected_var->get_tree (UNDEF_LOCATION);
+
+  bool is_unsigned = kind == AtomicMinMaxKind::UnsignedMax
+		     || kind == AtomicMinMaxKind::UnsignedMin;
+  auto comparison_type = is_unsigned ? unsigned_type_for (value_type)
+				     : signed_type_for (value_type);
+
+  // handle signedness irrespective of what the original type of the var is,
+  // in case users do things like using atomic_umin on signed types and expect
+  // it to work correctly
+  bool is_min = (kind == AtomicMinMaxKind::SignedMin
+		 || kind == AtomicMinMaxKind::UnsignedMin);
+  auto desired = build2 (is_min ? MIN_EXPR : MAX_EXPR, comparison_type,
+			 fold_convert (comparison_type, expected),
+			 fold_convert (comparison_type, value));
+  desired = fold_convert (value_type, desired);
+
+  auto exchange_addr = build_fold_addr_expr_loc (UNDEF_LOCATION, exchange_decl);
+  auto expected_addr = build_fold_addr_expr_loc (UNDEF_LOCATION, expected);
+  auto exchange_call
+    = Backend::call_expression (exchange_addr,
+				{dst, expected_addr, desired, boolean_true_node,
+				 make_unsigned_long_tree (ordering),
+				 failure_memorder},
+				nullptr, UNDEF_LOCATION);
+  TREE_READONLY (exchange_call) = 0;
+  TREE_SIDE_EFFECTS (exchange_call) = 1;
+
+  auto exit = Backend::exit_expression (exchange_call, UNDEF_LOCATION);
+  ctx.add_statement (Backend::loop_expression (exit, UNDEF_LOCATION));
+  ctx.add_statement (
+    Backend::return_statement (ctx.fn, expected, UNDEF_LOCATION));
+}
+
+static void
+atomic_fence (IntrinsicCtx &ctx, bool is_multithread, int ordering)
+{
+  // Most intrinsic functions are pure but not the atomic ones
+  TREE_READONLY (ctx.fn) = 0;
+  TREE_SIDE_EFFECTS (ctx.fn) = 1;
+
+  auto builtin_decl = BuiltinsContext::get ().lookup_simple_builtin (
+    is_multithread ? "__atomic_thread_fence" : "__atomic_signal_fence");
+  rust_assert (builtin_decl);
+
+  auto fence = build_fold_addr_expr_loc (UNDEF_LOCATION, *builtin_decl);
+  auto memorder = make_unsigned_long_tree (ordering);
+  auto fence_call
+    = Backend::call_expression (fence, {memorder}, nullptr, UNDEF_LOCATION);
+  TREE_READONLY (fence_call) = 0;
+  TREE_SIDE_EFFECTS (fence_call) = 1;
+
+  ctx.add_statement (fence_call);
+}
+
+// Shared inner implementation for ctlz and ctlz_nonzero.
+//
+// nonzero=false → ctlz: ctlz(0) is well-defined in Rust and must return
+//   bit_size, but __builtin_clz*(0) is undefined behaviour in C, so an
+//   explicit arg==0 guard is emitted.
+//
+// nonzero=true → ctlz_nonzero: the caller guarantees arg != 0 (passing 0
+//   is immediate UB in Rust), so the zero guard is omitted entirely.
+static void
+ctlz_handler (IntrinsicCtx &ctx, bool nonzero)
+{
+  auto arg_param = ctx.param_vars.at (0);
+
+  auto *monomorphized_type
+    = ctx.fntype.get_substs ().at (0).get_param_ty ()->resolve ();
+  auto call_locus = ctx.get_mappings ().lookup_location (ctx.fntype.get_ref ());
+  if (!check_for_basic_integer_type ("ctlz", call_locus, monomorphized_type))
+    return;
+
+  auto locus = ctx.fntype.get_locus ();
+  auto arg_expr = Backend::var_expression (arg_param, locus);
+  tree arg_type = TREE_TYPE (arg_expr);
+  unsigned bit_size = TYPE_PRECISION (arg_type);
+
+  // Convert signed types to their same-width unsigned equivalent before
+  // widening.  Without this, widening a signed type sign-extends it.
+  // For example, i8(-1) = 0xFF widened to u32 gives 0xFFFFFFFF, so
+  // __builtin_clz(0xFFFFFFFF) = 0, then 0 - diff(24) = -24.
+  // Converting to u8 first gives 0xFF → 0x000000FF (zero-extended), so
+  // __builtin_clz(0x000000FF) = 24, then 24 - 24 = 0.
+  tree unsigned_type
+    = !TYPE_UNSIGNED (arg_type) ? unsigned_type_for (arg_type) : arg_type;
+  tree unsigned_arg = fold_convert (unsigned_type, arg_expr);
+
+  // Pick the narrowest GCC clz builtin whose operand type is wide enough to
+  // hold bit_size bits.  diff records how many extra leading zeros the builtin
+  // will count due to the width difference and is subtracted from the result.
+  //
+  // Example: ctlz(1u8) bit_size=8, int_prec=32, diff=24.
+  //   __builtin_clz(1u) returns 31 (counts from bit 31 down to bit 0).
+  //   31 - 24 = 7, which is the correct answer for an 8-bit value.
+  //
+  // TODO: 128-bit integers are not yet handled.
+  unsigned int_prec = TYPE_PRECISION (unsigned_type_node);
+  unsigned long_prec = TYPE_PRECISION (long_unsigned_type_node);
+  unsigned longlong_prec = TYPE_PRECISION (long_long_unsigned_type_node);
+
+  const char *builtin_name = nullptr;
+  tree cast_type = NULL_TREE;
+  int diff = 0;
+
+  if (bit_size <= int_prec)
+    {
+      // Fits in unsigned int: covers 8/16/32-bit integers on most targets.
+      builtin_name = "__builtin_clz";
+      cast_type = unsigned_type_node;
+      diff = static_cast<int> (int_prec - bit_size);
+    }
+  else if (bit_size <= long_prec)
+    {
+      // Fits in unsigned long but not unsigned int.
+      builtin_name = "__builtin_clzl";
+      cast_type = long_unsigned_type_node;
+      diff = static_cast<int> (long_prec - bit_size);
+    }
+  else if (bit_size <= longlong_prec)
+    {
+      // Fits in unsigned long long but not unsigned long.
+      builtin_name = "__builtin_clzll";
+      cast_type = long_long_unsigned_type_node;
+      diff = static_cast<int> (longlong_prec - bit_size);
+    }
+  else
+    {
+      rust_sorry_at (locus, "ctlz for %u-bit integers is not yet implemented",
+		     bit_size);
+      return;
+    }
+
+  // Widen the unsigned arg to the chosen builtin's operand type, call it,
+  // then subtract the padding bits.  diff == 0 means the Rust type exactly
+  // matches the builtin's operand width, so the subtraction is skipped.
+  tree call_arg = fold_convert (cast_type, unsigned_arg);
+
+  auto builtin_decl
+    = BuiltinsContext::get ().lookup_simple_builtin (builtin_name);
+  rust_assert (builtin_decl);
+
+  tree builtin_fn = build_fold_addr_expr_loc (locus, *builtin_decl);
+  tree clz_expr
+    = Backend::call_expression (builtin_fn, {call_arg}, nullptr, locus);
+
+  if (diff > 0)
+    {
+      tree diff_cst = build_int_cst (integer_type_node, diff);
+      clz_expr
+	= fold_build2 (MINUS_EXPR, integer_type_node, clz_expr, diff_cst);
+    }
+
+  clz_expr = fold_convert (uint32_type_node, clz_expr);
+
+  tree final_expr;
+  if (!nonzero)
+    {
+      // ctlz(0) must return bit_size per the Rust reference.
+      // We cannot pass 0 to __builtin_clz* (UB), so emit:
+      //   arg == 0 ? bit_size : clz_expr
+      tree zero = build_int_cst (arg_type, 0);
+      tree cmp = fold_build2 (EQ_EXPR, boolean_type_node, arg_expr, zero);
+      tree width_cst = build_int_cst (uint32_type_node, bit_size);
+      final_expr
+	= fold_build3 (COND_EXPR, uint32_type_node, cmp, width_cst, clz_expr);
+    }
+  else
+    {
+      // ctlz_nonzero: arg != 0 is guaranteed by the caller, no guard needed.
+      final_expr = clz_expr;
+    }
+
+  tree result = fold_convert (TREE_TYPE (DECL_RESULT (ctx.fn)), final_expr);
+  auto return_stmt = Backend::return_statement (ctx.fn, result, locus);
+  ctx.add_statement (return_stmt);
+}
+
+// Shared inner implementation for cttz and cttz_nonzero.
+//
+// nonzero=false → cttz: cttz(0) is well-defined in Rust and must return
+//   bit_size, but __builtin_ctz*(0) is undefined behaviour in C, so an
+//   explicit arg==0 guard is emitted.
+//
+// nonzero=true → cttz_nonzero: the caller guarantees arg != 0 (passing 0
+//   is immediate UB in Rust), so the zero guard is omitted entirely.
+static void
+cttz_handler (IntrinsicCtx &ctx, bool nonzero)
+{
+  auto arg_param = ctx.param_vars.at (0);
+
+  auto *monomorphized_type
+    = ctx.fntype.get_substs ().at (0).get_param_ty ()->resolve ();
+  auto call_locus = ctx.get_mappings ().lookup_location (ctx.fntype.get_ref ());
+  if (!check_for_basic_integer_type ("cttz", call_locus, monomorphized_type))
+    return;
+
+  auto locus = ctx.fntype.get_locus ();
+  auto arg_expr = Backend::var_expression (arg_param, locus);
+  tree arg_type = TREE_TYPE (arg_expr);
+  unsigned bit_size = TYPE_PRECISION (arg_type);
+
+  // Convert signed types to their same-width unsigned equivalent before
+  // widening.  For cttz this is not strictly required for correctness (sign
+  // extension fills high bits with 1s, which does not alter the trailing-zero
+  // count at the low end), but it avoids relying on signed-integer
+  // representations and keeps the approach consistent with ctlz.
+  tree unsigned_type
+    = !TYPE_UNSIGNED (arg_type) ? unsigned_type_for (arg_type) : arg_type;
+  tree unsigned_arg = fold_convert (unsigned_type, arg_expr);
+
+  // Pick the narrowest GCC ctz builtin whose operand type is wide enough to
+  // hold bit_size bits.  Unlike ctlz, no diff adjustment is needed: widening
+  // a value zero-extends it (fills the added high bits with 0s), which does
+  // not introduce new trailing zeros at the low end.
+  //
+  // Example: cttz(0b00001000_u8) = 3
+  //   Widened to u32: 0x00000008.  __builtin_ctz(0x00000008) = 3.
+  //
+  // TODO: 128-bit integers are not yet handled.
+  unsigned int_prec = TYPE_PRECISION (unsigned_type_node);
+  unsigned long_prec = TYPE_PRECISION (long_unsigned_type_node);
+  unsigned longlong_prec = TYPE_PRECISION (long_long_unsigned_type_node);
+
+  const char *builtin_name = nullptr;
+  tree cast_type = NULL_TREE;
+
+  if (bit_size <= int_prec)
+    {
+      // Fits in unsigned int: covers 8/16/32-bit integers on most targets.
+      builtin_name = "__builtin_ctz";
+      cast_type = unsigned_type_node;
+    }
+  else if (bit_size <= long_prec)
+    {
+      // Fits in unsigned long but not unsigned int.
+      builtin_name = "__builtin_ctzl";
+      cast_type = long_unsigned_type_node;
+    }
+  else if (bit_size <= longlong_prec)
+    {
+      // Fits in unsigned long long but not unsigned long.
+      builtin_name = "__builtin_ctzll";
+      cast_type = long_long_unsigned_type_node;
+    }
+  else
+    {
+      rust_sorry_at (locus, "cttz for %u-bit integers is not yet implemented",
+		     bit_size);
+      return;
+    }
+
+  tree call_arg = fold_convert (cast_type, unsigned_arg);
+
+  auto builtin_decl
+    = BuiltinsContext::get ().lookup_simple_builtin (builtin_name);
+  rust_assert (builtin_decl);
+
+  tree builtin_fn = build_fold_addr_expr_loc (locus, *builtin_decl);
+  tree ctz_expr
+    = Backend::call_expression (builtin_fn, {call_arg}, nullptr, locus);
+
+  ctz_expr = fold_convert (uint32_type_node, ctz_expr);
+
+  tree final_expr;
+  if (!nonzero)
+    {
+      // cttz(0) must return bit_size per the Rust reference.
+      // We cannot pass 0 to __builtin_ctz* (UB), so emit:
+      //   arg == 0 ? bit_size : ctz_expr
+      tree zero = build_int_cst (arg_type, 0);
+      tree cmp = fold_build2 (EQ_EXPR, boolean_type_node, arg_expr, zero);
+      tree width_cst = build_int_cst (uint32_type_node, bit_size);
+      final_expr
+	= fold_build3 (COND_EXPR, uint32_type_node, cmp, width_cst, ctz_expr);
+    }
+  else
+    {
+      // cttz_nonzero: arg != 0 is guaranteed by the caller, no guard needed.
+      final_expr = ctz_expr;
+    }
+
+  tree result = fold_convert (TREE_TYPE (DECL_RESULT (ctx.fn)), final_expr);
+  auto return_stmt = Backend::return_statement (ctx.fn, result, locus);
+  ctx.add_statement (return_stmt);
+}
+
+static void
+fop_fast (IntrinsicCtx &ctx, ArithmeticOrLogicalOperator op)
+{
+  auto &lhs_param = ctx.param_vars.at (0);
+  auto &rhs_param = ctx.param_vars.at (1);
+  rust_assert (ctx.param_vars.size () == 2);
+
+  tree lhs = Backend::var_expression (lhs_param, UNDEF_LOCATION);
+  tree rhs = Backend::var_expression (rhs_param, UNDEF_LOCATION);
+
+  tree result_expr
+    = Backend::arithmetic_or_logical_expression (op, lhs, rhs, ctx.loc);
+
+  auto return_statement
+    = Backend::return_statement (ctx.fn, result_expr, UNDEF_LOCATION);
+
+  ctx.add_statement (return_statement);
+}
+
+static tree
+build_rust_string (IntrinsicCtx &ctx, const std::string &content)
+{
+  TyTy::BaseType *str = nullptr;
+  TyTy::BaseType *usize = nullptr;
+  rust_assert (ctx.get_tyctx ()->lookup_builtin ("str", &str));
+  rust_assert (ctx.get_tyctx ()->lookup_builtin ("usize", &usize));
+
+  tree meta_pointer = TyTyResolveCompile::compile (ctx.inner (), str);
+  tree usize_ty = TyTyResolveCompile::compile (ctx.inner (), usize);
+
+  auto base = Backend::string_constant_expression (content);
+  tree data = build_fold_addr_expr (base);
+
+  tree size = build_int_cstu (usize_ty, content.size ());
+
+  return Backend::constructor_expression (meta_pointer, false, {data, size}, -1,
+					  ctx.loc);
+}
+
+/**
+ * Check if a type is uninhabited - either the Never type or a variant-less enum
+ */
+static bool
+is_uninhabited (TyTy::BaseType *t)
+{
+  rust_assert (t);
+
+  if (auto adt = t->try_as<TyTy::ADTType> ())
+    if (adt->is_enum () && adt->number_of_variants () == 0)
+      return true;
+
+  if (t->is<TyTy::NeverType> ())
+    return true;
+
+  return false;
+}
+
+static void
+type_assert (IntrinsicCtx &ctx, TyAssert assert)
+{
+  /**
+   * These functions check whether a type respects a predicate *statically* - if
+   * the given generic is invalid, then panic at runtime, otherwise do nothing.
+   */
+
+  /**
+   * TODO: Since gccrs currently lacks comprehensive layout engine support for
+   * validity ranges (such as `rustc_layout_scalar_valid_range_start`), we
+   * cannot accurately determine if a type is safely zeroable or can be left
+   * uninitialized. Therefore, this is implemented as a temporary no-op stub
+   * except for uninhabited types. We emit a warning regarding this limitation.
+   */
+
+  auto t_param = ctx.fntype.get_substs ().at (0);
+  auto t_ty = t_param.get_param_ty ();
+  auto t = t_ty->resolve ();
+  auto t_name = t->get_name ();
+  auto valid = true;
+
+  // In all cases, invalid types are... invalid. So single out never and
+  // variant-less enums and return early
+  if (is_uninhabited (t))
+    valid = false;
+
+  /**
+   * TODO: Since gccrs currently lacks comprehensive layout engine support for
+   * validity ranges (such as `rustc_layout_scalar_valid_range_start`), we
+   * cannot accurately determine if a type is safely zeroable or can be left
+   * uninitialized. Therefore, this is implemented as a temporary no-op stub
+   * except for uninhabited types
+   */
+  auto always_warn = false;
+  auto fn_name = "";
+
+  // FIXME: Once we have proper verification for the layout of the given type,
+  // we need to separate our panic strings based on the operation we're doing -
+  // asserting that a type is inhabited, zero valid, or uninit valid
+  std::string panic_str;
+
+  switch (assert)
+    {
+    case TyAssert::Inhabited:
+      panic_str = "attempted to instantiate uninhabited type `" + t_name + "`";
+      break;
+    case TyAssert::ZeroValid:
+      panic_str = "attempted to zero-initialize type `" + t_name
+		  + "`, which is invalid";
+
+      // FIXME: Remove eventually
+      always_warn = true;
+      fn_name = "assert_zero_valid<T>";
+      break;
+    case TyAssert::UninitValid:
+      panic_str = "attempted to leave type `" + t_name
+		  + "` uninitialized, which is invalid";
+
+      // FIXME: Remove eventually
+      always_warn = true;
+      fn_name = "assert_uninit_valid<T>";
+      break;
+    }
+
+  if (always_warn)
+    {
+      rust_warning_at (ctx.loc, 0,
+		       "%qs was emitted as a no-op and "
+		       "will not trigger - this may be invalid",
+		       fn_name);
+    }
+
+  if (!valid)
+    {
+      auto arg = build_rust_string (ctx, panic_str);
+
+      auto panic_call = lang_item_call (ctx, LangItem::Kind::PANIC, {arg});
+
+      ctx.add_statement (panic_call);
+
+      // buh :(
+      TREE_READONLY (ctx.fn) = 0;
+      TREE_USED (ctx.fn) = 1;
+      TREE_SIDE_EFFECTS (ctx.fn) = 1;
+    }
+}
+
+void
+prefetch (IntrinsicCtx &ctx, Mode mode, Cache cache)
+{
+  // The core library technically allows you to pass any i32 value as a
+  // locality, but LLVM will then complain if the value cannot be constant
+  // evaluated. For now, we ignore the locality argument and instead always
+  // pass `3` (the most restrictive value). This allows us to still have
+  // prefetch behavior, just not as granular as expected. In future Rust
+  // versions, we hope that prefetch intrinsics will be split up according to
+  // locality, similarly to atomic intrinsics.
+  // The solution is to try and perform constant folding for the locality
+  // argument, or instead of creating a new function definition, modify the call
+  // site directly This has the bad side-effect of creating warnings about
+  // `unused name - locality`, which we hack away here:
+  // TODO: Take care of handling locality properly
+  Backend::var_expression (ctx.param_vars[1], UNDEF_LOCATION);
+
+  // If we are doing prefetches on the instruction cache, then emit a no-op. GCC
+  // currently has no support for prefetching the instruction cache, and
+  // prefetches are allowed to be completely ignored anyways. Revisit once
+  // __builtin_prefetch() accepts another argument for the `cache` to use, in
+  // the same way that llvm.prefetch does. In the same vein as above, mark the
+  // given addr as used so there's no complaints.
+  if (cache == Cache::Instruction)
+    {
+      Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+
+      return;
+    }
+
+  // prefetching isn't pure and shouldn't be discarded after GIMPLE
+  TREE_READONLY (ctx.fn) = 0;
+  TREE_SIDE_EFFECTS (ctx.fn) = 1;
+
+  auto addr = Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+
+  auto rw_flag = make_unsigned_long_tree (mode == Mode::Write ? 1 : 0);
+
+  auto prefetch_raw
+    = BuiltinsContext::get ().lookup_simple_builtin ("__builtin_prefetch");
+  rust_assert (prefetch_raw);
+
+  auto prefetch = build_fold_addr_expr_loc (UNKNOWN_LOCATION, *prefetch_raw);
+
+  auto prefetch_call = Backend::call_expression (prefetch,
+						 {addr, rw_flag,
+						  // locality arg
+						  make_unsigned_long_tree (3)},
+						 nullptr, UNDEF_LOCATION);
+
+  TREE_READONLY (prefetch_call) = 0;
+  TREE_SIDE_EFFECTS (prefetch_call) = 1;
+
+  ctx.add_statement (prefetch_call);
+}
+
+} // namespace inner
+
+Intrinsic::CompileFn
+op_with_overflow (tree_code op)
+{
+  return [op] (IntrinsicCtx &ctx) { return inner::op_with_overflow (ctx, op); };
+}
+
+Intrinsic::CompileFn
+fop_fast (ArithmeticOrLogicalOperator op)
+{
+  return [op] (IntrinsicCtx &ctx) { return inner::fop_fast (ctx, op); };
+}
+
+Intrinsic::CompileFn
+type_assert (TyAssert assert)
+{
+  return
+    [assert] (IntrinsicCtx &ctx) { return inner::type_assert (ctx, assert); };
+}
+
+void
+rotate_left (IntrinsicCtx &ctx)
+{
+  return handlers::rotate (ctx, LROTATE_EXPR);
+}
+
+void
+rotate_right (IntrinsicCtx &ctx)
+{
+  return handlers::rotate (ctx, RROTATE_EXPR);
+}
+
+Intrinsic::CompileFn
+wrapping_op (tree_code op)
+{
+  return [op] (IntrinsicCtx &ctx) { return inner::wrapping_op (ctx, op); };
+}
+
+Intrinsic::CompileFn
+atomic_store (int ordering)
+{
+  return [ordering] (IntrinsicCtx &ctx) {
+    return inner::atomic_store (ctx, ordering);
+  };
+}
+
+Intrinsic::CompileFn
+atomic_load (int ordering)
+{
+  return [ordering] (IntrinsicCtx &ctx) {
+    return inner::atomic_load (ctx, ordering);
+  };
+}
+
+Intrinsic::CompileFn
+atomic_xadd (int ordering)
+{
+  return [ordering] (IntrinsicCtx &ctx) {
+    return inner::atomic_binary_op (ctx, "fetch_add", ordering);
+  };
+}
+
+Intrinsic::CompileFn
+atomic_xsub (int ordering)
+{
+  return [ordering] (IntrinsicCtx &ctx) {
+    return inner::atomic_binary_op (ctx, "fetch_sub", ordering);
+  };
+}
+
+Intrinsic::CompileFn
+atomic_and (int ordering)
+{
+  return [ordering] (IntrinsicCtx &ctx) {
+    return inner::atomic_binary_op (ctx, "fetch_and", ordering);
+  };
+}
+
+Intrinsic::CompileFn
+atomic_nand (int ordering)
+{
+  return [ordering] (IntrinsicCtx &ctx) {
+    return inner::atomic_binary_op (ctx, "fetch_nand", ordering);
+  };
+}
+
+Intrinsic::CompileFn
+atomic_or (int ordering)
+{
+  return [ordering] (IntrinsicCtx &ctx) {
+    return inner::atomic_binary_op (ctx, "fetch_or", ordering);
+  };
+}
+
+Intrinsic::CompileFn
+atomic_xor (int ordering)
+{
+  return [ordering] (IntrinsicCtx &ctx) {
+    return inner::atomic_binary_op (ctx, "fetch_xor", ordering);
+  };
+}
+Intrinsic::CompileFn
+atomic_compare_exchange (bool weak, int success_ordering, int failure_ordering)
+{
+  return [weak, success_ordering, failure_ordering] (IntrinsicCtx &ctx) {
+    return inner::atomic_compare_exchange (ctx, weak, success_ordering,
+					   failure_ordering);
+  };
+}
+
+Intrinsic::CompileFn
+atomic_minmax (AtomicMinMaxKind kind, int ordering)
+{
+  return [kind, ordering] (IntrinsicCtx &ctx) {
+    return inner::atomic_minmax (ctx, kind, ordering);
+  };
+}
+
+Intrinsic::CompileFn
+atomic_fence (bool is_multithread, int ordering)
+{
+  return [is_multithread, ordering] (IntrinsicCtx &ctx) {
+    return inner::atomic_fence (ctx, is_multithread, ordering);
+  };
+}
+
+Intrinsic::CompileFn
+unchecked_op (tree_code op)
+{
+  return [op] (IntrinsicCtx &ctx) { return inner::unchecked_op (ctx, op); };
+}
+
+Intrinsic::CompileFn
+copy (bool overlaps)
+{
+  return [overlaps] (IntrinsicCtx &ctx) { return inner::copy (ctx, overlaps); };
+}
+
+Intrinsic::CompileFn
+expect (bool likely)
+{
+  return [likely] (IntrinsicCtx &ctx) { return inner::expect (ctx, likely); };
+}
+
+Intrinsic::CompileFn
+try_handler (bool is_new_api)
+{
+  return [is_new_api] (IntrinsicCtx &ctx) {
+    return inner::try_handler (ctx, is_new_api);
+  };
+}
+
+Intrinsic::CompileFn
+prefetch (Mode mode, Cache cache)
+{
+  return [mode, cache] (IntrinsicCtx &ctx) {
+    return inner::prefetch (ctx, mode, cache);
+  };
+}
+
+void
+sorry (IntrinsicCtx &ctx)
+{
+  rust_sorry_at (ctx.loc, "intrinsic %qs is not yet implemented",
+		 ctx.fntype.get_identifier ().c_str ());
+}
+
+void
+assume (IntrinsicCtx &ctx)
+{
+  // TODO: make sure this is actually helping the compiler optimize
+
+  rust_assert (ctx.fntype.param_at (0).get_type ()->get_kind ()
+	       == TyTy::TypeKind::BOOL);
+
+  // TODO: make sure these are necessary
+  TREE_READONLY (ctx.fn) = 0;
+  DECL_DISREGARD_INLINE_LIMITS (ctx.fn) = 1;
+  DECL_ATTRIBUTES (ctx.fn) = tree_cons (get_identifier ("always_inline"),
+					NULL_TREE, DECL_ATTRIBUTES (ctx.fn));
+
+  tree val = Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+
+  tree assume_expr = build_call_expr_internal_loc (UNDEF_LOCATION, IFN_ASSUME,
+						   void_type_node, 1, val);
+  TREE_SIDE_EFFECTS (assume_expr) = 1;
+
+  ctx.add_statement (assume_expr);
+}
+
+void
+discriminant_value (IntrinsicCtx &ctx)
+{
+  auto &mapping = ctx.fntype.get_substs ().at (0);
+  auto param_ty = mapping.get_param_ty ();
+  rust_assert (param_ty->can_resolve ());
+  auto resolved = param_ty->resolve ();
+
+  TyTy::BaseType *return_type = nullptr;
+  bool ok = ctx.get_tyctx ()->lookup_builtin ("isize", &return_type);
+  rust_assert (ok);
+
+  bool is_adt = resolved->is<TyTy::ADTType> ();
+  bool is_enum = false;
+  if (is_adt)
+    {
+      const auto &adt = *static_cast<TyTy::ADTType *> (resolved);
+      auto *repr = adt.get_repr_options ().repr;
+      if (repr != nullptr)
+	return_type = repr;
+      is_enum = adt.is_enum ();
+    }
+
+  tree result = integer_zero_node;
+  if (is_enum)
+    {
+      tree val = Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+      tree deref = build_fold_indirect_ref_loc (UNKNOWN_LOCATION, val);
+      result = Backend::struct_field_expression (deref, 0, UNKNOWN_LOCATION);
+    }
+
+  auto return_statement
+    = Backend::return_statement (ctx.fn, result, BUILTINS_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+void
+variant_count (IntrinsicCtx &ctx)
+{
+  auto &mapping = ctx.fntype.get_substs ().at (0);
+  auto param_ty = mapping.get_param_ty ();
+  rust_assert (param_ty->can_resolve ());
+  auto resolved = param_ty->resolve ();
+
+  size_t variant_count = 0;
+  bool is_adt = resolved->is<TyTy::ADTType> ();
+  if (is_adt)
+    {
+      const auto &adt = *static_cast<TyTy::ADTType *> (resolved);
+      variant_count = adt.number_of_variants ();
+    }
+
+  tree result_decl = DECL_RESULT (ctx.fn);
+  tree type = TREE_TYPE (result_decl);
+
+  mpz_t ival;
+  mpz_init_set_ui (ival, variant_count);
+  tree result = wide_int_to_tree (type, wi::from_mpz (type, ival, true));
+  mpz_clear (ival);
+
+  auto return_statement
+    = Backend::return_statement (ctx.fn, result, BUILTINS_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+void
+move_val_init (IntrinsicCtx &ctx)
+{
+  // Most intrinsic functions are pure - not `move_val_init`
+  TREE_READONLY (ctx.fn) = 0;
+  TREE_SIDE_EFFECTS (ctx.fn) = 1;
+
+  // get the template parameter type tree fn size_of<T>();
+  auto &param_mapping = ctx.fntype.get_substs ().at (0);
+  auto param_tyty = param_mapping.get_param_ty ();
+  auto resolved_tyty = param_tyty->resolve ();
+  tree template_parameter_type
+    = TyTyResolveCompile::compile (ctx.inner (), resolved_tyty);
+
+  tree dst = Backend::var_expression (ctx.param_vars[0], UNDEF_LOCATION);
+  tree src = Backend::var_expression (ctx.param_vars[1], UNDEF_LOCATION);
+  tree size = TYPE_SIZE_UNIT (template_parameter_type);
+
+  auto memcpy_builtin
+    = BuiltinsContext::get ().lookup_simple_builtin ("__builtin_memcpy");
+  rust_assert (memcpy_builtin);
+
+  src = build_fold_addr_expr_loc (BUILTINS_LOCATION, src);
+  tree memset_call = build_call_expr_loc (BUILTINS_LOCATION, *memcpy_builtin, 3,
+					  dst, src, size);
+
+  ctx.add_statement (memset_call);
+}
+
+void
+uninit (IntrinsicCtx &ctx)
+{
+  // uninit has _zero_ parameters its parameter is the generic one
+
+  // Most intrinsic functions are pure - not `uninit_handler`
+  TREE_READONLY (ctx.fn) = 0;
+  TREE_SIDE_EFFECTS (ctx.fn) = 1;
+
+  // get the template parameter type tree fn uninit<T>();
+  auto &param_mapping = ctx.fntype.get_substs ().at (0);
+  const auto param_tyty = param_mapping.get_param_ty ();
+  auto resolved_tyty = param_tyty->resolve ();
+  tree template_parameter_type
+    = TyTyResolveCompile::compile (ctx.inner (), resolved_tyty);
+
+  // result temporary
+  tree dst_type = TREE_TYPE (DECL_RESULT (ctx.fn));
+  rust_assert (TYPE_SIZE_UNIT (template_parameter_type)
+	       == TYPE_SIZE_UNIT (dst_type));
+
+  tree tmp_stmt = error_mark_node;
+  Bvariable *bvar
+    = Backend::temporary_variable (ctx.fn, NULL_TREE, dst_type, NULL_TREE,
+				   true /*address_is_taken*/, UNDEF_LOCATION,
+				   &tmp_stmt);
+
+  ctx.set_block_variables ({bvar});
+
+  auto memset_builtin
+    = BuiltinsContext::get ().lookup_simple_builtin ("__builtin_memset");
+  rust_assert (memset_builtin);
+
+  // call memset with 0x01 and size of the thing see
+  // https://github.com/Rust-GCC/gccrs/issues/1899
+
+  tree dst = bvar->get_tree (BUILTINS_LOCATION);
+  tree dst_addr = build_fold_addr_expr_loc (BUILTINS_LOCATION, dst);
+  tree constant_byte = build_int_cst (integer_type_node, 0x01);
+  tree size_expr = TYPE_SIZE_UNIT (template_parameter_type);
+
+  tree memset_call = build_call_expr_loc (BUILTINS_LOCATION, *memset_builtin, 3,
+					  dst_addr, constant_byte, size_expr);
+  ctx.add_statement (memset_call);
+
+  auto return_statement
+    = Backend::return_statement (ctx.fn, dst, UNDEF_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+void
+rotate (IntrinsicCtx &ctx, tree_code op)
+{
+  // rotate intrinsic has two parameter
+
+  auto &x_param = ctx.param_vars.at (0);
+  auto &y_param = ctx.param_vars.at (1);
+  rust_assert (ctx.param_vars.size () == 2);
+
+  tree x = Backend::var_expression (x_param, UNDEF_LOCATION);
+  tree y = Backend::var_expression (y_param, UNDEF_LOCATION);
+  tree rotate_expr
+    = fold_build2_loc (BUILTINS_LOCATION, op, TREE_TYPE (x), x, y);
+  auto return_statement
+    = Backend::return_statement (ctx.fn, rotate_expr, UNDEF_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+void
+transmute (IntrinsicCtx &ctx)
+{
+  // param to convert
+  Bvariable *convert_me_param = ctx.param_vars.at (0);
+  tree convert_me_expr
+    = Backend::var_expression (convert_me_param, UNDEF_LOCATION);
+
+  // check for transmute pre-conditions
+  tree target_type_expr = TREE_TYPE (DECL_RESULT (ctx.fn));
+  tree source_type_expr = ctx.param_types.at (0);
+  tree target_size_expr = TYPE_SIZE (target_type_expr);
+  tree source_size_expr = TYPE_SIZE (source_type_expr);
+  // for some reason, unit types and other zero-sized types return NULL for the
+  // size expressions
+  unsigned HOST_WIDE_INT target_size
+    = target_size_expr ? TREE_INT_CST_LOW (target_size_expr) : 0;
+  unsigned HOST_WIDE_INT source_size
+    = source_size_expr ? TREE_INT_CST_LOW (source_size_expr) : 0;
+
+  // size check for concrete types
+  // TODO(liushuyu): check alignment for pointers; check for dependently-sized
+  // types
+  if (target_size != source_size)
+    {
+      rust_error_at (ctx.fntype.get_locus (),
+		     "cannot transmute between types of different sizes, or "
+		     "dependently-sized types");
+      rust_inform (
+	ctx.fntype.get_ident ().locus, "source type: %qs (%lu bits)",
+	ctx.fntype.get_params ().at (0).get_type ()->as_string ().c_str (),
+	(unsigned long) source_size);
+      rust_inform (ctx.fntype.get_ident ().locus, "target type: %qs (%lu bits)",
+		   ctx.fntype.get_return_type ()->as_string ().c_str (),
+		   (unsigned long) target_size);
+    }
+
+  // Return *((orig_type*)&decl)  */
+
+  tree t = build_fold_addr_expr_loc (UNKNOWN_LOCATION, convert_me_expr);
+  t = fold_build1_loc (UNKNOWN_LOCATION, NOP_EXPR,
+		       build_pointer_type (target_type_expr), t);
+  tree result_expr = build_fold_indirect_ref_loc (UNKNOWN_LOCATION, t);
+
+  auto return_statement
+    = Backend::return_statement (ctx.fn, result_expr, UNDEF_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+void
+sizeof_handler (IntrinsicCtx &ctx)
+{
+  // size_of has _zero_ parameters its parameter is the generic one
+
+  // get the template parameter type tree fn size_of<T>();
+  auto &param_mapping = ctx.fntype.get_substs ().at (0);
+  const auto param_tyty = param_mapping.get_param_ty ();
+  auto resolved_tyty = param_tyty->resolve ();
+  tree template_parameter_type
+    = TyTyResolveCompile::compile (ctx.inner (), resolved_tyty);
+
+  tree size_expr = TYPE_SIZE_UNIT (template_parameter_type);
+  auto return_statement
+    = Backend::return_statement (ctx.fn, size_expr, UNDEF_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+/**
+ * pub fn size_of_val<T: ?Sized>(_: *const T) -> usize;
+ */
+void
+size_of_val_handler (IntrinsicCtx &ctx)
+{
+  auto locus = ctx.fntype.get_locus ();
+
+  auto &__param = ctx.param_vars.at (0);
+  rust_assert (ctx.param_vars.size () == 1);
+
+  auto &param_mapping = ctx.fntype.get_substs ().at (0);
+  const auto param_tyty = param_mapping.get_param_ty ();
+  auto resolved_tyty = param_tyty->resolve ();
+  tree template_parameter_type
+    = TyTyResolveCompile::compile (ctx.inner (), resolved_tyty);
+
+  tree size_expr = NULL_TREE;
+
+  tree param = Backend::var_expression (__param, UNDEF_LOCATION);
+  tree param_ty = TREE_TYPE (param);
+  if (RS_DST_FLAG_P (param_ty))
+    {
+      tree data_field = TYPE_FIELDS (param_ty);
+      tree meta_field = DECL_CHAIN (data_field);
+      tree meta_field_expr
+	= build3_loc (locus, COMPONENT_REF, TREE_TYPE (meta_field), param,
+		      meta_field, NULL_TREE);
+
+      TyTy::BaseType *inner_dst = get_inner_dst (resolved_tyty);
+      tree tail_size_expr = NULL_TREE;
+      if (inner_dst->get_kind () == TyTy::TypeKind::SLICE
+	  || inner_dst->get_kind () == TyTy::TypeKind::STR)
+	{
+	  tree elem_type = NULL_TREE;
+	  if (inner_dst->get_kind () == TyTy::TypeKind::SLICE)
+	    {
+	      auto slice_tyty = static_cast<TyTy::SliceType *> (inner_dst);
+	      elem_type
+		= TyTyResolveCompile::compile (ctx.inner (),
+					       slice_tyty->get_element_type ());
+	    }
+	  else
+	    elem_type = char_type_node;
+
+	  tree elem_size = TYPE_SIZE_UNIT (elem_type);
+	  tail_size_expr
+	    = build2_loc (locus, MULT_EXPR, size_type_node,
+			  fold_convert_loc (locus, size_type_node,
+					    meta_field_expr),
+			  fold_convert_loc (locus, size_type_node, elem_size));
+	}
+      else if (inner_dst->get_kind () == TyTy::TypeKind::DYNAMIC)
+	{
+	  tree vtable_ptr_ty = TREE_TYPE (meta_field_expr);
+	  tree vtable_ty = TREE_TYPE (vtable_ptr_ty);
+
+	  tree vtable_ref
+	    = build1_loc (locus, INDIRECT_REF, vtable_ty, meta_field_expr);
+
+	  tree vtable_field_0 = TYPE_FIELDS (vtable_ty);
+	  tree vtable_field_size = DECL_CHAIN (vtable_field_0);
+	  rust_assert (vtable_field_size != NULL_TREE);
+
+	  tail_size_expr
+	    = build3_loc (locus, COMPONENT_REF, TREE_TYPE (vtable_field_size),
+			  vtable_ref, vtable_field_size, NULL_TREE);
+	}
+      else
+	{
+	  rust_unreachable ();
+	}
+      if (resolved_tyty->get_kind () == TyTy::TypeKind::ADT)
+	size_expr = build2_loc (locus, PLUS_EXPR, size_type_node,
+				fold_convert_loc (locus, size_type_node,
+						  TYPE_SIZE_UNIT (
+						    template_parameter_type)),
+				tail_size_expr);
+      else
+	size_expr = tail_size_expr;
+    }
+  else
+    size_expr = TYPE_SIZE_UNIT (template_parameter_type);
+
+  auto return_statement
+    = Backend::return_statement (ctx.fn, size_expr, UNDEF_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+/**
+ * pub fn min_align_of<T>() -> usize;
+ */
+void
+min_align_of_handler (IntrinsicCtx &ctx)
+{
+  // min_align_of has _zero_ parameters its parameter is the generic one
+
+  // get the template parameter type tree fn min_align_of<T>();
+  auto &param_mapping = ctx.fntype.get_substs ().at (0);
+  const auto param_tyty = param_mapping.get_param_ty ();
+  auto resolved_tyty = param_tyty->resolve ();
+  tree template_parameter_type
+    = TyTyResolveCompile::compile (ctx.inner (), resolved_tyty);
+
+  tree align_expr
+    = build_int_cst (size_type_node, TYPE_ALIGN_UNIT (template_parameter_type));
+
+  auto return_statement
+    = Backend::return_statement (ctx.fn, align_expr, UNDEF_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+/**
+ * pub fn min_align_of_val<T: ?Sized>(_: *const T) -> usize;
+ */
+void
+min_align_of_val_handler (IntrinsicCtx &ctx)
+{
+  auto locus = ctx.fntype.get_locus ();
+
+  auto &__param = ctx.param_vars.at (0);
+  rust_assert (ctx.param_vars.size () == 1);
+
+  auto &param_mapping = ctx.fntype.get_substs ().at (0);
+  const auto param_tyty = param_mapping.get_param_ty ();
+  auto resolved_tyty = param_tyty->resolve ();
+  tree template_parameter_type
+    = TyTyResolveCompile::compile (ctx.inner (), resolved_tyty);
+
+  tree align_expr = NULL_TREE;
+  tree param = Backend::var_expression (__param, UNDEF_LOCATION);
+  tree param_ty = TREE_TYPE (param);
+  if (RS_DST_FLAG_P (param_ty))
+    {
+      tree data_field = TYPE_FIELDS (param_ty);
+      tree meta_field = DECL_CHAIN (data_field);
+      tree meta_field_expr
+	= build3_loc (locus, COMPONENT_REF, TREE_TYPE (meta_field), param,
+		      meta_field, NULL_TREE);
+
+      TyTy::BaseType *inner_dst = get_inner_dst (resolved_tyty);
+      tree tail_align_expr = NULL_TREE;
+
+      if (inner_dst->get_kind () == TyTy::TypeKind::SLICE
+	  || inner_dst->get_kind () == TyTy::TypeKind::STR)
+	{
+	  tree elem_type = NULL_TREE;
+	  if (inner_dst->get_kind () == TyTy::TypeKind::SLICE)
+	    {
+	      auto slice_tyty = static_cast<TyTy::SliceType *> (inner_dst);
+	      elem_type
+		= TyTyResolveCompile::compile (ctx.inner (),
+					       slice_tyty->get_element_type ());
+	    }
+	  else
+	    elem_type = char_type_node;
+
+	  tail_align_expr
+	    = build_int_cst (size_type_node, TYPE_ALIGN_UNIT (elem_type));
+	}
+      else if (inner_dst->get_kind () == TyTy::TypeKind::DYNAMIC)
+	{
+	  tree vtable_ptr_ty = TREE_TYPE (meta_field_expr);
+	  tree vtable_ty = TREE_TYPE (vtable_ptr_ty);
+
+	  tree vtable_ref
+	    = build1_loc (locus, INDIRECT_REF, vtable_ty, meta_field_expr);
+
+	  tree vtable_field_0 = TYPE_FIELDS (vtable_ty);
+	  tree vtable_field_1 = DECL_CHAIN (vtable_field_0);
+	  tree vtable_field_align = DECL_CHAIN (vtable_field_1);
+	  rust_assert (vtable_field_align != NULL_TREE);
+
+	  tail_align_expr
+	    = build3_loc (locus, COMPONENT_REF, TREE_TYPE (vtable_field_align),
+			  vtable_ref, vtable_field_align, NULL_TREE);
+	}
+      else
+	{
+	  rust_unreachable ();
+	}
+
+      if (resolved_tyty->get_kind () == TyTy::TypeKind::ADT)
+	{
+	  tree base_align_expr
+	    = build_int_cst (size_type_node,
+			     TYPE_ALIGN_UNIT (template_parameter_type));
+	  align_expr = build2_loc (locus, MAX_EXPR, size_type_node,
+				   base_align_expr, tail_align_expr);
+	}
+      else
+	align_expr = tail_align_expr;
+    }
+  else
+    align_expr = build_int_cst (size_type_node,
+				TYPE_ALIGN_UNIT (template_parameter_type));
+
+  auto return_statement
+    = Backend::return_statement (ctx.fn, align_expr, UNDEF_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+void
+offset (IntrinsicCtx &ctx)
+{
+  // offset intrinsic has two params dst pointer and offset isize
+
+  auto &dst_param = ctx.param_vars.at (0);
+  auto &size_param = ctx.param_vars.at (1);
+  rust_assert (ctx.param_vars.size () == 2);
+
+  tree dst = Backend::var_expression (dst_param, UNDEF_LOCATION);
+  tree size = Backend::var_expression (size_param, UNDEF_LOCATION);
+  tree pointer_offset_expr = pointer_offset_expression (dst, size, ctx.loc);
+  auto return_statement
+    = Backend::return_statement (ctx.fn, pointer_offset_expr, UNDEF_LOCATION);
+  ctx.add_statement (return_statement);
+}
+
+/**
+ * pub const fn bswap<T: Copy>(x: T) -> T;
+ */
+void
+bswap_handler (IntrinsicCtx &ctx)
+{
+  auto locus = ctx.fntype.get_locus ();
+
+  auto &x_param = ctx.param_vars.at (0);
+  rust_assert (ctx.param_vars.size () == 1);
+
+  auto *monomorphized_type
+    = ctx.fntype.get_substs ().at (0).get_param_ty ()->resolve ();
+
+  auto call_locus = ctx.get_mappings ().lookup_location (ctx.fntype.get_ref ());
+  check_for_basic_integer_type ("bswap", call_locus, monomorphized_type);
+
+  tree template_parameter_type
+    = TyTyResolveCompile::compile (ctx.inner (), monomorphized_type);
+
+  tree size_expr = TYPE_SIZE_UNIT (template_parameter_type);
+  unsigned HOST_WIDE_INT size = TREE_INT_CST_LOW (size_expr);
+
+  auto expr_x = Backend::var_expression (x_param, locus);
+  tree result = NULL_TREE;
+
+  if (size == 1)
+    {
+      result = expr_x;
+    }
+  else
+    {
+      tree target_type = NULL_TREE;
+      const char *builtin_name = nullptr;
+      switch (size)
+	{
+	case 2:
+	  builtin_name = "__builtin_bswap16";
+	  target_type = uint16_type_node;
+	  break;
+	case 4:
+	  builtin_name = "__builtin_bswap32";
+	  target_type = uint32_type_node;
+	  break;
+	case 8:
+	  builtin_name = "__builtin_bswap64";
+	  target_type = uint64_type_node;
+	  break;
+	case 16:
+	  builtin_name = "__builtin_bswap128";
+	  target_type = uint128_type_node;
+	  break;
+	default:
+	  rust_unreachable ();
+	  return;
+	}
+
+      auto bswap_raw
+	= BuiltinsContext::get ().lookup_simple_builtin (builtin_name);
+
+      if (bswap_raw)
+	{
+	  tree bswap_fn = build_fold_addr_expr_loc (locus, *bswap_raw);
+
+	  auto bswap_x = build1 (CONVERT_EXPR, target_type, expr_x);
+
+	  auto bswap_call
+	    = Backend::call_expression (bswap_fn, {bswap_x}, NULL_TREE, locus);
+
+	  result = build1 (CONVERT_EXPR, template_parameter_type, bswap_call);
+	}
+      else
+	{
+	  bswap_raw = BuiltinsContext::get ().lookup_simple_builtin (
+	    "__builtin_bswap64");
+	  rust_assert (bswap_raw);
+
+	  tree bswap_fn = build_fold_addr_expr_loc (locus, *bswap_raw);
+
+	  tree tmp_in_stmt = error_mark_node;
+	  Bvariable *in_var
+	    = Backend::temporary_variable (ctx.fn, NULL_TREE,
+					   template_parameter_type, expr_x,
+					   true, locus, &tmp_in_stmt);
+	  ctx.add_statement (tmp_in_stmt);
+
+	  tree addr_x
+	    = build_fold_addr_expr_loc (locus, in_var->get_tree (locus));
+	  tree u64_ptr_type = build_pointer_type (uint64_type_node);
+
+	  tree low_ptr = fold_convert (u64_ptr_type, addr_x);
+	  tree low = build_fold_indirect_ref_loc (locus, low_ptr);
+
+	  tree high_ptr = fold_build2 (POINTER_PLUS_EXPR, u64_ptr_type, low_ptr,
+				       size_int (8));
+	  tree high = build_fold_indirect_ref_loc (locus, high_ptr);
+
+	  auto new_high
+	    = Backend::call_expression (bswap_fn, {low}, NULL_TREE, locus);
+	  auto new_low
+	    = Backend::call_expression (bswap_fn, {high}, NULL_TREE, locus);
+
+	  tree tmp_stmt = error_mark_node;
+	  Bvariable *result_var
+	    = Backend::temporary_variable (ctx.fn, NULL_TREE,
+					   template_parameter_type, NULL_TREE,
+					   true, locus, &tmp_stmt);
+	  ctx.add_statement (tmp_stmt);
+
+	  tree addr_res
+	    = build_fold_addr_expr_loc (locus, result_var->get_tree (locus));
+	  tree res_ptr = fold_convert (u64_ptr_type, addr_res);
+
+	  tree store_low
+	    = build2 (MODIFY_EXPR, void_type_node,
+		      build_fold_indirect_ref_loc (locus, res_ptr), new_low);
+	  ctx.add_statement (store_low);
+
+	  tree res_high_ptr = fold_build2 (POINTER_PLUS_EXPR, u64_ptr_type,
+					   res_ptr, size_int (8));
+	  tree store_high
+	    = build2 (MODIFY_EXPR, void_type_node,
+		      build_fold_indirect_ref_loc (locus, res_high_ptr),
+		      new_high);
+	  ctx.add_statement (store_high);
+
+	  result = result_var->get_tree (locus);
+	}
+    }
+
+  auto return_statement = Backend::return_statement (ctx.fn, result, locus);
+
+  TREE_READONLY (result) = 1;
+
+  ctx.add_statement (return_statement);
+}
+
+void
+ctlz_handler (IntrinsicCtx &ctx)
+{
+  return inner::ctlz_handler (ctx, false);
+}
+
+void
+ctlz_nonzero_handler (IntrinsicCtx &ctx)
+{
+  return inner::ctlz_handler (ctx, true);
+}
+
+void
+cttz_handler (IntrinsicCtx &ctx)
+{
+  return inner::cttz_handler (ctx, false);
+}
+
+void
+cttz_nonzero_handler (IntrinsicCtx &ctx)
+{
+  return inner::cttz_handler (ctx, true);
+}
+
+/**
+ * pub unsafe fn write_bytes<T>(dst: *mut T, val: u8, count: usize);
+ */
+void
+write_bytes_handler (IntrinsicCtx &ctx)
+{
+  auto locus = ctx.fntype.get_locus ();
+
+  auto &dst_param = ctx.param_vars.at (0);
+  auto &val_param = ctx.param_vars.at (1);
+  auto &count_param = ctx.param_vars.at (2);
+  rust_assert (ctx.param_vars.size () == 3);
+
+  auto *monomorphized_type
+    = ctx.fntype.get_substs ().at (0).get_param_ty ()->resolve ();
+
+  tree template_parameter_type
+    = TyTyResolveCompile::compile (ctx.inner (), monomorphized_type);
+  tree dst_size_expr = TYPE_SIZE_UNIT (template_parameter_type);
+  rust_assert (dst_size_expr != NULL_TREE);
+
+  tree expr_dst = Backend::var_expression (dst_param, locus);
+  tree expr_val = Backend::var_expression (val_param, locus);
+  tree expr_count = Backend::var_expression (count_param, locus);
+
+  tree expr_count_final
+    = fold_build2_loc (locus, MULT_EXPR, size_type_node,
+		       fold_convert_loc (locus, size_type_node, expr_count),
+		       fold_convert_loc (locus, size_type_node, dst_size_expr));
+
+  // void* memset( void* dest, int ch, size_t count );
+  auto write_bytes_raw
+    = BuiltinsContext::get ().lookup_simple_builtin ("__builtin_memset");
+  rust_assert (write_bytes_raw);
+
+  tree write_bytes_fn = build_fold_addr_expr_loc (locus, *write_bytes_raw);
+  tree write_bytes_call
+    = Backend::call_expression (write_bytes_fn,
+				{expr_dst, expr_val, expr_count_final},
+				NULL_TREE, locus);
+
+  ctx.add_statement (write_bytes_call);
+
+  TREE_READONLY (ctx.fn) = 0;
+}
+
+/**
+ * pub fn arith_offset<T>(dst: *const T, offset: isize) -> *const T;
+ */
+void
+arith_offset_handler (IntrinsicCtx &ctx)
+{
+  auto locus = ctx.fntype.get_locus ();
+
+  auto &dst_param = ctx.param_vars.at (0);
+  auto &size_param = ctx.param_vars.at (1);
+  rust_assert (ctx.param_vars.size () == 2);
+
+  tree dst = Backend::var_expression (dst_param, locus);
+  tree size = Backend::var_expression (size_param, locus);
+  tree pointer_offset_expr = pointer_offset_expression (dst, size, ctx.loc);
+  auto return_statement
+    = Backend::return_statement (ctx.fn, pointer_offset_expr, locus);
+  ctx.add_statement (return_statement);
+}
+
+void
+exact_div_handler (IntrinsicCtx &ctx)
+{
+  auto lhs_param = ctx.param_vars.at (0);
+  auto rhs_param = ctx.param_vars.at (1);
+
+  auto lhs = Backend::var_expression (lhs_param, ctx.loc);
+  auto rhs = Backend::var_expression (rhs_param, ctx.loc);
+
+  auto div_expr
+    = build2_loc (ctx.loc, EXACT_DIV_EXPR, TREE_TYPE (lhs), lhs, rhs);
+
+  auto return_stmt = Backend::return_statement (ctx.fn, div_expr, ctx.loc);
+
+  ctx.add_statement (return_stmt);
+}
+
+void
+float_to_int_unchecked (IntrinsicCtx &ctx)
+{
+  auto &dst_param = ctx.fntype.get_substs ().at (1);
+  const auto dst_ty = dst_param.get_param_ty ();
+  auto int_ty_resolved = dst_ty->resolve ();
+
+  auto int_ty = TyTyResolveCompile::compile (ctx.inner (), int_ty_resolved);
+
+  rust_assert (ctx.param_vars.size () == 1);
+
+  auto &float_param = ctx.param_vars.at (0);
+
+  tree float_value = Backend::var_expression (float_param, UNDEF_LOCATION);
+
+  auto convert_expr
+    = Backend::convert_expression (int_ty, float_value, ctx.loc);
+
+  auto return_statement
+    = Backend::return_statement (ctx.fn, convert_expr, ctx.loc);
+
+  ctx.add_statement (return_statement);
+}
+
+void
+breakpoint (IntrinsicCtx &ctx)
+{
+  // For now, we don't have access to an equivalent of LLVM's debugtrap inst. We
+  // work around the problem by emitting a regular trap and we hope that the
+  // user's debugger can catch it :) Ideally, this would emit an `int3` on x86
+  // rather than a `ud2`
+
+  auto trap = BuiltinsContext::get ().lookup_simple_builtin ("__builtin_trap");
+  rust_assert (trap);
+
+  tree trap_call = build_call_expr_loc (ctx.loc, *trap, 0);
+
+  ctx.add_statement (trap_call);
+
+  TREE_READONLY (ctx.fn) = 0;
+  TREE_USED (ctx.fn) = 1;
+  TREE_SIDE_EFFECTS (ctx.fn) = 1;
+}
+
+} // namespace handlers
+} // namespace Compile
+} // namespace Rust

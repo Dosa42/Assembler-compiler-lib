@@ -1,0 +1,180 @@
+# Copyright 2023-2026 Free Software Foundation, Inc.
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+standard_testfile
+if {[prepare_for_testing "failed to prepare" $testfile $srcfile]} {
+    return
+}
+
+if {![runto_main]} {
+    return
+}
+
+set bp_line1 [gdb_get_line_number "bp for locals 1"]
+set bp_line2 [gdb_get_line_number "bp for locals 2"]
+set bp_line3 [gdb_get_line_number "bp for locals 3"]
+set bp_line4 [gdb_get_line_number "bp for locals 4"]
+set bp_line5 [gdb_get_line_number "bp for locals 5"]
+
+set val1_d1 [gdb_get_line_number "val1-d1"]
+set val1_d2 [gdb_get_line_number "val1-d2"]
+set val1_d3 [gdb_get_line_number "val1-d3"]
+set val2_d1 [gdb_get_line_number "val2-d1"]
+set val2_d2 [gdb_get_line_number "val2-d2"]
+set val2_d3 [gdb_get_line_number "val2-d3"]
+set val3_d1 [gdb_get_line_number "val3-d1"]
+set val3_d2 [gdb_get_line_number "val3-d2"]
+set a_line [gdb_get_line_number "bp for entry"]
+
+gdb_breakpoint $srcfile:$bp_line1
+gdb_continue_to_breakpoint "continue to outermost level" \
+    ".*$srcfile:$bp_line1.*"
+gdb_test "info locals"  [multi_line \
+    "val1 = 1"  \
+    "val2 = 2"  \
+    ] "info locals at outermost level"
+
+gdb_breakpoint $srcfile:$bp_line2
+gdb_continue_to_breakpoint "continue to first level" ".*$srcfile:$bp_line2.*"
+gdb_test "info locals"  [multi_line \
+    "val2 = 3\t<$srcfile:$val2_d2>"  \
+    "val3 = 4"  \
+    "a = 101"   \
+    "val1 = 1"  \
+    "val2 = 2\t<$srcfile:$val2_d1, shadowed>"  \
+    "Use \"set print shadowed off\" to hide shadowed variables." \
+    ] "info locals first level"
+
+gdb_breakpoint $srcfile:$bp_line3
+gdb_continue_to_breakpoint "continue to second level" ".*$srcfile:$bp_line3.*"
+gdb_test "info locals" [multi_line \
+    "val1 = 5\t<$srcfile:$val1_d2>"  \
+    "val2 = 3\t<$srcfile:$val2_d2>"  \
+    "val3 = 4"  \
+    "a = 102"   \
+    "val1 = 1\t<$srcfile:$val1_d1, shadowed>"  \
+    "val2 = 2\t<$srcfile:$val2_d1, shadowed>"  \
+    "Use \"set print shadowed off\" to hide shadowed variables." \
+    ] "info locals second level"
+
+gdb_breakpoint $srcfile:$bp_line4
+gdb_continue_to_breakpoint "continue to innermost level" ".*$srcfile:$bp_line4.*"
+gdb_test "info locals" [multi_line \
+    "a = 999\t<${testfile}2.c:16>" \
+    "val1 = 6\t<$srcfile:$val1_d3>"  \
+    "val2 = 7\t<$srcfile:$val2_d3>"  \
+    "val3 = 8\t<$srcfile:$val3_d2>"  \
+    "val1 = 5\t<$srcfile:$val1_d2, shadowed>" \
+    "val2 = 3\t<$srcfile:$val2_d2, shadowed>" \
+    "val3 = 4\t<$srcfile:$val3_d1, shadowed>" \
+    "a = 103\t<$srcfile:$a_line, shadowed>"   \
+    "val1 = 1\t<$srcfile:$val1_d1, shadowed>" \
+    "val2 = 2\t<$srcfile:$val2_d1, shadowed>" \
+    "Use \"set print shadowed off\" to hide shadowed variables." \
+    ] "info locals at innermost level"
+
+gdb_test "info locals -shadowed off" [multi_line \
+    "a = 999"   \
+    "val1 = 6"  \
+    "val2 = 7"  \
+    "val3 = 8"  \
+    "Some shadowed variables were omitted, use \"set print shadowed on\" to include them." \
+    ] "info locals -shadowed off at innermost level"
+
+# Use a type filter.  Only the shadowed variable is of type double.
+gdb_test "info locals -t double" [multi_line \
+    "val3 = 4\t<$srcfile:$val3_d1, shadowed>" \
+    "Use \"set print shadowed off\" to hide shadowed variables." \
+    ] "info locals -t double at innermost level"
+
+gdb_test "backtrace -full" [multi_line \
+    "#0 +shadowing \\(\\) at .*" \
+    "\[ \t\]+a = 999\t<${testfile}2.c:16>" \
+    "\[ \t\]+val1 = 6\t<$srcfile:$val1_d3>"  \
+    "\[ \t\]+val2 = 7\t<$srcfile:$val2_d3>"  \
+    "\[ \t\]+val3 = 8\t<$srcfile:$val3_d2>"  \
+    "\[ \t\]+val1 = 5\t<$srcfile:$val1_d2, shadowed>" \
+    "\[ \t\]+val2 = 3\t<$srcfile:$val2_d2, shadowed>" \
+    "\[ \t\]+val3 = 4\t<$srcfile:$val3_d1, shadowed>" \
+    "\[ \t\]+a = 103\t<$srcfile:$a_line, shadowed>"   \
+    "\[ \t\]+val1 = 1\t<$srcfile:$val1_d1, shadowed>" \
+    "\[ \t\]+val2 = 2\t<$srcfile:$val2_d1, shadowed>" \
+    "#1 +$hex in main \\(\\) at .*" \
+    "No locals\\." \
+    ] "backtrace -full including shadowed variables"
+
+gdb_test_no_output "set print shadowed off"
+
+gdb_test "show print shadowed" \
+    "Printing of shadowed variables is off\\." \
+    "show print shadowed off"
+
+gdb_test "backtrace -full" [multi_line \
+    "#0 +shadowing \\(\\) at .*" \
+    "\[ \t\]+a = 999" \
+    "\[ \t\]+val1 = 6"  \
+    "\[ \t\]+val2 = 7"  \
+    "\[ \t\]+val3 = 8"  \
+    "#1 +$hex in main \\(\\) at .*" \
+    "No locals\\." \
+    ] "backtrace -full excluding shadowed variables"
+
+gdb_test "info locals" [multi_line \
+    "a = 999"   \
+    "val1 = 6"  \
+    "val2 = 7"  \
+    "val3 = 8"  \
+    "Some shadowed variables were omitted, use \"set print shadowed on\" to include them." \
+    ] "info locals at innermost level with filtered out shadowed"
+
+# Use a type filter.  Printing of shadowed variables is disabled, so nothing
+# is printed.
+gdb_test "info locals -t double" [multi_line \
+    "No matching locals\\." \
+    "Some shadowed variables were omitted, use \"set print shadowed on\" to include them." \
+    ] "info locals -t double with filtered out shadowed"
+
+# Variables filtered by a regexp are not reported as shadowed.
+gdb_test "info locals -t float" "No matching locals\\." \
+    "info locals -t float with filtered out shadowed"
+
+# Override the user's setting to print shadowed variables.
+gdb_test "info locals -shadowed on" [multi_line \
+    "a = 999\t<${testfile}2.c:16>" \
+    "val1 = 6\t<$srcfile:$val1_d3>"  \
+    "val2 = 7\t<$srcfile:$val2_d3>"  \
+    "val3 = 8\t<$srcfile:$val3_d2>"  \
+    "val1 = 5\t<$srcfile:$val1_d2, shadowed>" \
+    "val2 = 3\t<$srcfile:$val2_d2, shadowed>" \
+    "val3 = 4\t<$srcfile:$val3_d1, shadowed>" \
+    "a = 103\t<$srcfile:$a_line, shadowed>"   \
+    "val1 = 1\t<$srcfile:$val1_d1, shadowed>" \
+    "val2 = 2\t<$srcfile:$val2_d1, shadowed>" \
+    "Use \"set print shadowed off\" to hide shadowed variables." \
+    ] "info locals -shadowed on at innermost level"
+
+# The quiet option suppresses the hint about the shadowed setting.
+gdb_test_no_output "info locals -q -t double"
+
+gdb_test_no_output "set print shadowed on"
+
+gdb_breakpoint $srcfile:$bp_line5
+gdb_continue_to_breakpoint "continue to outermost level last" \
+    ".*$srcfile:$bp_line5.*"
+gdb_test "info locals" [multi_line \
+    "a = 105" \
+    "val1 = 1"  \
+    "val2 = 2"  \
+    ] "info locals at outermost level last"

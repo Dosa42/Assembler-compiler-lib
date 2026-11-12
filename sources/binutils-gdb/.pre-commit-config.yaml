@@ -1,0 +1,187 @@
+# Git has the notion of hooks, which are custom scripts that are run on
+# specific events.  One of these hooks is the pre-commit hook (located at
+# .git/hooks/pre-commit), which is run when committing, before specifying a
+# message.
+#
+# To ease management of the pre-commit hook, the pre-commit framework
+# ( https://pre-commit.com ) was developed.  This is the configuration file
+# for that framework.  It contains a list of hooks, with information on where
+# to find them and on which files to run them.
+#
+# See here ( https://pre-commit.com/#install ) on how to install the
+# pre-commit framework.
+#
+# To run all the hooks specified in this file manually, you can do:
+# $ pre-commit run
+#
+# To run some hooks and skip others, you can use environment variable SKIP:
+# $ SKIP=flake8,isort pre-commit run
+#
+# To install the pre-commit framework in the repository in order to run the
+# hooks on every commit, do:
+# $ pre-commit install
+#
+# After installing the pre-commit framework, you can skip running all
+# pre-commit hooks using --no-verify, or some using SKIP.
+# $ git commit --no-verify ...
+# $ SKIP=flake8,isort git commit ...
+#
+# In case some of these hooks don't work for you, you can make the SKIP
+# setting permanent by:
+# - setting SKIP in your environment
+#   (this will affect all repositories where it is set)
+# - setting SKIP in .git/hooks/pre-commit by adding "export SKIP=..."
+#   (this will affect only this repository, but it may have to be re-added
+#    if .git/hooks/pre-commit is regenerated)
+#
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+
+---
+minimum_pre_commit_version: 4.5.1
+default_install_hook_types: [pre-commit, commit-msg]
+default_stages: [pre-commit]
+# A default files setting like "files: '^(gdb|gdbserver|gdbsupport)/" would be
+# nice, but that disables commit-msg hooks.  See this pre-commit issue (
+# https://github.com/pre-commit/pre-commit/issues/3720 ).
+
+repos:
+  # Python hooks.  Run these for (in glob notation):
+  #
+  #  - gdb/*.py
+  #  - gdb/python/**/*.py
+  #  - gdb/testsuite/*.py
+  #
+  - repo: https://github.com/psf/black-pre-commit-mirror
+    rev: 26.10.1
+    hooks:
+      - id: black
+        files: &gdb_python_files '^gdb/.*\.py$'
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.5.0
+    hooks:
+      - id: flake8
+        files: *gdb_python_files
+        args: [--config, gdb/setup.cfg]
+  - repo: https://github.com/pycqa/isort
+    rev: 9.0.2
+    hooks:
+      - id: isort
+        files: *gdb_python_files
+        # Isort's .pre-commit-hooks.yaml sets stages, overriding default_stages,
+        # so this hook needs an explicit setting.
+        stages: [pre-commit]
+
+  # Codespell hooks.
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.3
+    hooks:
+      - id: codespell
+        args: &codespell_args [--toml, gdb/pyproject.toml]
+        files: &gdb_files '^(gdb|gdbserver|gdbsupport)/'
+        # 'tomllib' library is not available on Python < 3.11.
+        additional_dependencies: &codespell_deps ['tomli']
+      - id: codespell
+        name: codespell-log
+        entry: gdb/contrib/codespell-log.sh
+        args: *codespell_args
+        additional_dependencies: *codespell_deps
+        # Override the [text] setting in .pre-commit-hooks.yaml, allowing this
+        # hook to see the same files as codespell usage outside pre-commit.
+        # Instead, filter files in gdb/pyproject.toml.
+        types: &types_default [file]
+        types_or: &types_or_default []
+        verbose: true
+        stages: [commit-msg]
+
+  # Tclint hooks.
+  - repo: https://github.com/nmoroze/tclint
+    rev: v0.9.0
+    hooks:
+      - id: tclint
+        args: [--trust-plugins]
+        files: '^gdb/testsuite/.*\.(exp|tcl)$'
+
+  # Yaml hooks.
+  - repo: https://github.com/adrienverge/yamllint.git
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        files: &pre_commit_config_file '^\.pre-commit-config.yaml$'
+        # By default warnings don't cause yamllint to return non-zero, so they:
+        # - don't cause the hook to fail, and
+        # - are hidden unless pre-commit runs in verbose mode.
+        # Enable strict mode to make sure we see and fix warnings.
+        args: [--strict]
+
+  # Local hooks.
+  - repo: local
+    hooks:
+      - id: &id0 check-include-guards
+        name: *id0
+        language: unsupported_script
+        entry: gdb/check-include-guards.py
+        # All gdb header files, but not headers in the test suite.
+        files: '^(gdb(support|server)?)/.*\.h$'
+        exclude: &testsuite_files '.*/testsuite/.*'
+      - id: &id1 check-gnu-style
+        name: *id1
+        language: python
+        additional_dependencies: ['termcolor', 'unidiff']
+        entry: gdb/contrib/check-gnu-style-pre-commit.sh
+        files: '^(gdb(support|server)?)/.*\.(c|h|cc)$'
+        exclude: *testsuite_files
+        verbose: true
+      - id: &id2 check-whitespace
+        name: *id2
+        language: unsupported_script
+        entry: gdb/contrib/check-whitespace-pre-commit.py
+        # Don't filter files on types, allowing this hook to see same files as
+        # git usage outside pre-commit.  Instead, filter files in .gitignore.
+        files: *gdb_files
+      - id: &id3 pre-commit-setup
+        name: *id3
+        language: python
+        entry: gdb/contrib/pre-commit-setup.py
+        additional_dependencies: ["pyyaml"]
+        always_run: true
+        pass_filenames: false
+      - id: &id4 check-file-mode
+        name: *id4
+        language: unsupported_script
+        entry: gdb/contrib/check-file-mode.sh
+        files: *gdb_files
+        # With the default types == [file], because types and types_or are
+        # and-ed, no symlinks will be selected, so we use types == [] instead.
+        types: []
+        types_or: [file, symlink]
+      - id: &id5 shellcheck
+        name: *id5
+        files: '^(gdb|gdbsupport|gdbserver)/'
+        types: ['shell']
+        language: unsupported_script
+        # The gdb/contrib/shellcheck.sh script requires shellcheck 0.11.0
+        # (preferred) or 0.10.0.  Not pinning this to a single version is a
+        # compromise to deal with the fact that users themselves need to
+        # provide the dependency, which may be non-trivial.
+        entry: gdb/contrib/shellcheck.sh
+        stages: [manual]
+      - id: &id6 pre-commit-config-check
+        name: *id6
+        language: python
+        entry: gdb/contrib/pre-commit.py
+        args: [--config-check]
+        additional_dependencies: ["pyyaml"]
+        files: *pre_commit_config_file
+      - id: &id7 check-copies
+        name: *id7
+        language: unsupported_script
+        entry: gdb/contrib/check-copies.py
+        files: *gdb_files
+        exclude: *testsuite_files
+        require_serial: true
+
+# Local Variables:
+# indent-tabs-mode: nil
+# tab-width: 2
+# End:

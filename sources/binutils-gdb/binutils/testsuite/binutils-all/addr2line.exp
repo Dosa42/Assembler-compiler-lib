@@ -1,0 +1,103 @@
+#   Copyright (C) 2018-2026 Free Software Foundation, Inc.
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street - Fifth Floor, Boston, MA 02110-1301, USA.
+
+set testname "addr2line"
+set opts ""
+set pfx ""
+set exe [exeext]
+
+# If the host is Windows/MSYS, replace the leading /x with a DOS/Windows
+# drive letter, e.g change /x/y/foo/bar to X:/y/foo/bar.
+set tmp_srcdir $srcdir
+if { [ishost *-*-mingw*] } {
+    # Step 1: Replace the leading /x/ with x:/.
+    set tmp_srcdir [regsub {^/([a-zA-Z])/} $srcdir {\1:/}]
+    # Step 2: Change the leading x to X.
+    set tmp_srcdir [string toupper [string index $tmp_srcdir 0]][string range $tmp_srcdir 1 end]
+}
+
+# Which function is reported when two of them cover exactly the same range.
+# An inlined subroutine covering exactly the range of the subprogram that
+# contains it must be the one named, and the same one on every run.
+if { [is_elf_format] } {
+    # ft32 relaxation leaves ".byte .Lfunc_end - .Lfunc_begin" unresolvable
+    # at assembly time.
+    set norelax ""
+    if [istarget ft32-*] {
+	set norelax [list [list as -norelax]]
+    }
+    run_dump_test "dw2-inline-tie" $norelax
+}
+
+# powerpc64 function symbols are on descriptors rather than code.
+# MUSL uses the ELFv2 ABI for PowerPC, so the problem does not apply there.
+if { [istarget powerpc64-*-*] && ![istarget powerpc64-*-musl] } {
+    set opts --synthetic
+    set pfx {\.}
+}
+
+# Bare metal gcc for H8/300 prepends an underscore to symbol names.
+# Note that h8300-linux-gnu-gcc does not do this.
+if { [istarget h8300-*-elf] } {
+    set pfx {_}
+}
+
+if { [target_compile $srcdir/$subdir/testprog.c tmpdir/testprog executable debug] != "" } {
+    verbose "Unable to compile test file."
+    untested "$testname"
+    return
+}
+
+#testcase for default option.
+#Run nm command and input the main symbol address to addr2line.
+set output [binutils_run $NM "$opts tmpdir/testprog$exe"]
+if ![regexp -line "^(\[0-9a-fA-F\]+)? +\[Tt\] ${pfx}main" $output contents] then {
+    fail "$testname"
+} else {
+    set list [regexp -inline -all -- {\S+} $contents]
+    set got [binutils_run $ADDR2LINE "-e tmpdir/testprog$exe [lindex $list 0]"]
+    set want "$tmp_srcdir/$subdir/testprog.c:\[0-9\]+"
+    if ![regexp $want $got] then {
+	fail "$testname $got\n"
+    } else {
+	pass "$testname"
+    }
+}
+
+#testcase for -f option.
+#Run nm command and input the fn function symbol address to addr2line.
+if ![regexp -line "^(\[0-9a-fA-F\]+)? +\[Tt\] ${pfx}fn" $output contents] then {
+    fail "$testname -f option"
+} else {
+    set list [regexp -inline -all -- {\S+} $contents]
+    set got [binutils_run $ADDR2LINE "-f -e tmpdir/testprog$exe [lindex $list 0]"]
+    set want "fn\n$tmp_srcdir/$subdir/testprog.c:\[0-9\]+"
+    if ![regexp $want $got] then {
+	fail "$testname -f option $got\n"
+    } else {
+	pass "$testname -f option"
+    }
+
+#testcase for -s option.
+#Using the same fn function address used in -f option.
+    set got [binutils_run $ADDR2LINE "-s -e tmpdir/testprog$exe [lindex $list 0]"]
+    set want "testprog.c:\[0-9\]+"
+    if ![regexp $want $got] then {
+	fail "$testname -s option $got\n"
+    } else {
+	pass "$testname -s option"
+    }
+}

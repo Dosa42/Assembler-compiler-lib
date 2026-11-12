@@ -1,0 +1,91 @@
+/* Block a thread with a timeout.  Mach version.
+   Copyright (C) 2000-2026 Free Software Foundation, Inc.
+   This file is part of the GNU C Library.
+
+   The GNU C Library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public
+   License as published by the Free Software Foundation; either
+   version 2.1 of the License, or (at your option) any later version.
+
+   The GNU C Library is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Lesser General Public License for more details.
+
+   You should have received a copy of the GNU Lesser General Public
+   License along with the GNU C Library;  if not, see
+   <https://www.gnu.org/licenses/>.  */
+
+#include <assert.h>
+#include <errno.h>
+#include <time.h>
+#include <sys/time.h>
+
+#include <mach.h>
+#include <mach/message.h>
+
+#include <pt-internal.h>
+
+#ifndef MSG_OPTIONS
+# define MSG_OPTIONS 0
+#endif
+
+/* Block THREAD.  */
+error_t
+__pthread_timedblock (struct __pthread *thread,
+		      const struct timespec *abstime, clockid_t clock_id)
+{
+  error_t err;
+  mach_msg_header_t msg;
+  mach_msg_timeout_t timeout;
+  struct timespec now;
+  time_t sec_diff;
+  mach_msg_timeout_t sec_diff_timeout, nsec_diff_timeout;
+
+retry:
+  /* We have an absolute time and now we have to convert it to a
+     relative time.  Arg.  */
+
+  err = __clock_gettime (clock_id, &now);
+  assert (!err);
+
+  if (now.tv_sec > abstime->tv_sec
+      || (now.tv_sec == abstime->tv_sec && now.tv_nsec > abstime->tv_nsec))
+    return ETIMEDOUT;
+
+  sec_diff = abstime->tv_sec - now.tv_sec;
+
+  if (abstime->tv_nsec >= now.tv_nsec)
+    nsec_diff_timeout = (abstime->tv_nsec - now.tv_nsec + 999999) / 1000000;
+  else
+    {
+      /* Need to do a carry.  */
+      sec_diff--;
+      nsec_diff_timeout = (abstime->tv_nsec + 1000000000 - now.tv_nsec + 999999) / 1000000;
+    }
+
+  sec_diff_timeout = sec_diff;
+  if (sec_diff_timeout != sec_diff
+      || __builtin_mul_overflow (sec_diff_timeout, 1000u, &timeout)
+      || __builtin_add_overflow (timeout, nsec_diff_timeout, &timeout))
+    /* Overflow, use maximum expressable value.  */
+    timeout = (mach_msg_timeout_t) -1;
+
+  err = __mach_msg (&msg, MACH_RCV_MSG | MACH_RCV_TIMEOUT | MSG_OPTIONS | MACH_RCV_INTERRUPT, 0,
+		    sizeof msg, thread->wakeupmsg.msgh_remote_port,
+		    timeout, MACH_PORT_NULL);
+  if (err == EMACH_RCV_TIMED_OUT)
+    return ETIMEDOUT;
+  if (err == MACH_RCV_INTERRUPTED)
+    {
+      if ((MSG_OPTIONS & MACH_RCV_INTERRUPT) != 0)
+	return EINTR;
+      else
+	/* Re-convert absolute time to relative time.  */
+	goto retry;
+    }
+
+  assert_perror (err);
+  return 0;
+}
+libc_hidden_def (__pthread_timedblock)

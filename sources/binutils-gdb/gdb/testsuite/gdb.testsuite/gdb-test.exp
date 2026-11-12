@@ -1,0 +1,157 @@
+# Copyright 2022-2026 Free Software Foundation, Inc.
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# The purpose of this test-case is to check various
+# gdb_test / gdb_test_multiple properties.
+
+clean_restart
+
+# Check that a command with trailing newline triggers an error.
+
+with_test_prefix "cmd with trailing newline" {
+    set results [catch {
+	gdb_test "pwd\n" ".*" "pwd"
+    } output]
+
+    gdb_assert { $results == 1 }
+    set expected_error_msg "Invalid trailing newline in \"pwd\n\" command"
+    gdb_assert { [string equal $output $expected_error_msg] }
+}
+
+with_test_prefix "cmd with trailing control code" {
+    foreach_with_prefix control_code {^C ^D} {
+	switch $control_code {
+	    ^C {
+		set cmd "\003"
+	    }
+	    ^D {
+		set cmd "\004"
+	    }
+	}
+	set results [catch {
+	    gdb_test $cmd ".*" "control code"
+	} output]
+
+	gdb_assert { $results == 1 }
+	set expected_error_msg "Invalid trailing control code in \"$cmd\" command"
+	gdb_assert { [string equal $output $expected_error_msg] }
+    }
+}
+
+proc quit {proc} {
+    with_override perror nop {
+	with_override fail nop {
+	    if {$proc == "gdb_test_multiple"} {
+		set res [gdb_test_multiple "quit" "" {}]
+		# Not reached.
+	    } elseif {$proc == "gdb_test"} {
+		set res [gdb_test "quit"]
+		# Reached.
+	    }
+	    return [expr {100 + $res}]
+	}
+    }
+    # Not reached.
+    return 200
+}
+
+if {![is_remote host]} {
+    with_test_prefix "eof handling" {
+	set res 300
+	try {
+	    set res [quit gdb_test_multiple]
+	} on return {result} {
+	} finally {
+	    # Proc gdb_test_multiple does "return -1" on eof, which makes its
+	    # caller return.  Check that behavior.
+	    gdb_assert {$res == -1} "gdb_test_multiple"
+	}
+
+	clean_restart
+
+	set res 300
+	try {
+	    set res [quit gdb_test]
+	} on return {result} {
+	} finally {
+	    # Proc gdb_test_multiple does "return -1" on eof, which makes its
+	    # caller return, which is gdb_test.  Check that behavior.
+	    gdb_assert {$res == 99} "gdb_test"
+	}
+
+	clean_restart
+    }
+}
+
+foreach_with_prefix variant {0 1 2} {
+    proc level_2_inner {} {
+	if {$::variant == 0} {
+	    return -level 2 "return_level_2"
+	} elseif {$::variant == 1} {
+	    send_gdb "print 1\n"
+	    set prompt_re [string_to_regexp "(gdb) "]
+	    remote_expect host 10 {
+		-re " = 1\r\n$prompt_re$" {
+		    return -level 2 "return_level_2"
+		}
+	    }
+	} else {
+	    gdb_test_multiple "print 1" "" {
+		-re -wrap " = 1" {
+		    return -level 2 "return_level_2"
+		}
+	    }
+	}
+	return "inner"
+    }
+
+    proc level_2_outer {} {
+	level_2_inner
+	return "outer"
+    }
+
+    try {
+	set res "initial"
+	set res [level_2_outer]
+    } finally {
+	if {$variant == 0} {
+	    # trivial case.
+	    gdb_assert {$res == "return_level_2"}
+	} elseif {$variant == 1} {
+	    # Remote_expect case.
+	    if {$res == "outer"} {
+		# Dejagnu bug.
+		# https://debbugs.gnu.org/cgi/bugreport.cgi?bug=81691
+		setup_xfail *-*-*
+	    }
+	    gdb_assert {$res == "return_level_2"}
+	    set variant1_res $res
+	} else {
+	    # Gdb_test_multiple case. This should work if the remote_expect
+	    # case works.
+	    gdb_assert {$res == $variant1_res}
+	}
+    }
+}
+
+# Change the prompt.
+set prompt "(GDB) "
+set prompt_re "\\(GDB\\) $"
+gdb_test -prompt $prompt_re "set prompt $prompt"
+
+gdb_test_multiple "print 1" "" -prompt $prompt_re {
+    -re -wrap " = 1" {
+	pass $gdb_test_name
+    }
+}

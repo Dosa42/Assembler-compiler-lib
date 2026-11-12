@@ -1,0 +1,42 @@
+{
+  "imported_at": "2026-11-12T05:13:38.509035+00:00",
+  "repositories": [
+    {
+      "path": "sources/gcc",
+      "url": "https://gcc.gnu.org/git/gcc.git",
+      "branch": "master",
+      "commit": "1600ba65f603ec6e92583ba8aeba5c825cd7c887",
+      "components": [
+        "GCC C/C++"
+      ]
+    },
+    {
+      "path": "sources/binutils-gdb",
+      "url": "https://sourceware.org/git/binutils-gdb.git",
+      "branch": "master",
+      "commit": "c79376a262328164cdf81eddfcc5518314b1856a",
+      "components": [
+        "Binutils",
+        "GDB"
+      ]
+    },
+    {
+      "path": "sources/newlib-cygwin",
+      "url": "https://sourceware.org/git/newlib-cygwin.git",
+      "branch": "main",
+      "commit": "2158d1470cedcc8f5cc8888c25b392fedb8ff0db",
+      "components": [
+        "Newlib"
+      ]
+    },
+    {
+      "path": "sources/glibc",
+      "url": "https://sourceware.org/git/glibc.git",
+      "branch": "master",
+      "commit": "03628c2f85acaab6ef71c37c954fd0707685e0f0",
+      "components": [
+        "Glibc"
+      ]
+    }
+  ]
+}

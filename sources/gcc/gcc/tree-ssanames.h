@@ -1,0 +1,184 @@
+/* SSA name expresssons routines
+   Copyright (C) 2013-2026 Free Software Foundation, Inc.
+
+This file is part of GCC.
+
+GCC is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free
+Software Foundation; either version 3, or (at your option) any later
+version.
+
+GCC is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ for more details.
+
+You should have received a copy of the GNU General Public License
+along with GCC; see the file COPYING3.  If not see
+<http://www.gnu.org/licenses/>.  */
+
+#ifndef GCC_TREE_SSANAMES_H
+#define GCC_TREE_SSANAMES_H
+
+inline irange_storage *
+ssa_name_irange_info (const_tree name)
+{
+  vrange_storage *s = SSA_NAME_RANGE_INFO (name);
+  return s ? s->dyn_irange () : NULL;
+}
+
+inline prange_storage *
+ssa_name_prange_info (const_tree name)
+{
+  vrange_storage *s = SSA_NAME_RANGE_INFO (name);
+  return s ? s->dyn_prange () : NULL;
+}
+
+inline frange_storage *
+ssa_name_frange_info (const_tree name)
+{
+  vrange_storage *s = SSA_NAME_RANGE_INFO (name);
+  return s ? s->dyn_frange () : NULL;
+}
+
+/* Return NAME's points-to solution, or NULL if it has none.  Returns NULL
+   for a non pointer type.  */
+inline const pt_solution *
+ssa_name_pt_solution (const_tree name)
+{
+  prange_storage *s = ssa_name_prange_info (name);
+  return s ? s->pt : NULL;
+}
+
+/* Make PT the points-to solution for NAME, which must have pointer type.  */
+extern void set_ssa_name_pt_solution (tree name, const pt_solution &pt);
+
+#define SSANAMES(fun) (fun)->gimple_df->ssa_names
+#define DEFAULT_DEFS(fun) (fun)->gimple_df->default_defs
+
+#define num_ssa_names (vec_safe_length (cfun->gimple_df->ssa_names))
+#define ssa_name(i) ((*cfun->gimple_df->ssa_names)[(i)])
+
+#define FOR_EACH_SSA_NAME(I, VAR, FN)					\
+  for (I = 1; SSANAMES (FN)->iterate (I, &VAR); ++I)			\
+    if (VAR)
+
+/* Sets the value range to SSA.  */
+extern bool set_range_info (tree, const vrange &);
+extern void set_nonzero_bits (tree, const wide_int &);
+extern void set_bitmask (tree, const wide_int &value, const wide_int &mask);
+extern wide_int get_nonzero_bits (const_tree);
+extern wide_int get_known_nonzero_bits (const_tree);
+extern bool ssa_name_has_boolean_range (tree, gimple * = nullptr);
+extern void init_ssanames (struct function *, int);
+extern void fini_ssanames (struct function *);
+extern void ssanames_print_statistics (void);
+extern tree make_ssa_name_fn (struct function *, tree, gimple *,
+			      unsigned int version = 0);
+extern void init_ssa_name_imm_use (tree);
+extern void release_ssa_name_fn (struct function *, tree);
+extern bool get_ssa_name_alignment (const_tree, unsigned int *,
+				    unsigned int *);
+extern void mark_ssa_name_alignment_unknown (tree);
+extern void set_ssa_name_alignment (tree, unsigned int, unsigned int);
+extern void set_ptr_nonnull (tree);
+extern bool ptr_nonnull_p (tree);
+
+extern tree copy_ssa_name_fn (struct function *, tree, gimple *);
+extern tree duplicate_ssa_name_fn (struct function *, tree, gimple *);
+extern void duplicate_ssa_name_pt_solution (tree dest, const pt_solution *);
+extern void duplicate_ssa_name_pt_solution (tree dest, tree src);
+extern void duplicate_ssa_name_range_info (tree dest, tree src,
+					   bool remove_local_addr = false);
+extern void maybe_duplicate_ssa_info_at_copy (tree dest, tree src);
+extern void reset_flow_sensitive_info (tree);
+extern void reset_flow_sensitive_info_in_bb (basic_block);
+extern void release_defs (gimple *);
+extern void replace_ssa_name_symbol (tree, tree);
+extern void flush_ssaname_freelist (void);
+
+
+/* Return an SSA_NAME node for variable VAR defined in statement STMT
+   in function cfun.  */
+
+inline tree
+make_ssa_name (tree var, gimple *stmt = NULL)
+{
+  return make_ssa_name_fn (cfun, var, stmt);
+}
+
+/* Return an SSA_NAME node using the template SSA name NAME defined in
+   statement STMT in function cfun.  */
+
+inline tree
+copy_ssa_name (tree var, gimple *stmt = NULL)
+{
+  return copy_ssa_name_fn (cfun, var, stmt);
+}
+
+/*  Creates a duplicate of a SSA name NAME tobe defined by statement STMT
+    in function cfun.  */
+
+inline tree
+duplicate_ssa_name (tree var, gimple *stmt)
+{
+  return duplicate_ssa_name_fn (cfun, var, stmt);
+}
+
+/* Release the SSA name NAME used in function cfun.  */
+
+inline void
+release_ssa_name (tree name)
+{
+  release_ssa_name_fn (cfun, name);
+}
+
+/* Return an anonymous SSA_NAME node for type TYPE defined in statement STMT
+   in function cfun.  Arrange so that it uses NAME in dumps.  */
+
+inline tree
+make_temp_ssa_name (tree type, gimple *stmt, const char *name)
+{
+  tree ssa_name;
+  gcc_checking_assert (TYPE_P (type));
+  ssa_name = make_ssa_name_fn (cfun, type, stmt);
+  SET_SSA_NAME_VAR_OR_IDENTIFIER (ssa_name, get_identifier (name));
+  return ssa_name;
+}
+
+/* A class which is used to save/restore the flow sensitive information.  */
+class flow_sensitive_info_storage
+{
+public:
+  /* Save the flow sensitive info from NAME. */
+  inline void save (tree name)
+    {
+      gcc_checking_assert (state == 0);
+      range_info = SSA_NAME_RANGE_INFO (name);
+      state = 1;
+    }
+
+  /* Restore the flow sensitive info from NAME. */
+  inline void restore (tree name) const
+    {
+      gcc_checking_assert (state == 1);
+      SSA_NAME_RANGE_INFO (name) = range_info;
+    }
+
+  /* Save the flow sensitive info from NAME and reset that info.  */
+  inline void save_and_clear (tree name)
+    {
+      save (name);
+      reset_flow_sensitive_info (name);
+    }
+
+  /* Clear the storage. */
+  inline void clear_storage () { state = 0; }
+private:
+  /* 0 means there is nothing saved.  1 means something is saved.  */
+  int state = 0;
+  /* The range info contains all flow sensitive information now.  */
+  vrange_storage *range_info = nullptr;
+};
+
+#endif /* GCC_TREE_SSANAMES_H */
