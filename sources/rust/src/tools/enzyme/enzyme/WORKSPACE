@@ -1,0 +1,38 @@
+# Keep the local LLVM repository configuration here while its Bzlmod migration
+# is evaluated separately. All other external dependencies live in MODULE.bazel.
+
+new_local_repository(
+    name = "llvm-raw",
+    build_file_content = "# empty",
+    path = "../llvm-project",
+)
+
+load("@llvm-raw//utils/bazel:configure.bzl", "llvm_configure")
+
+llvm_configure(
+    name = "llvm-project",
+    targets = [
+        "AArch64",
+        "NVPTX",
+        "X86",
+        "AMDGPU",
+    ],
+)
+
+# compile_commands.json generator
+load("//third_party/hedron_compile_commands:workspace.bzl", hedron_compile_commands_workspace = "repo")
+
+hedron_compile_commands_workspace()
+
+load("@hedron_compile_commands//:workspace_setup.bzl", "hedron_compile_commands_setup")
+load("@hedron_compile_commands//:workspace_setup_transitive.bzl", "hedron_compile_commands_setup_transitive")
+load("@hedron_compile_commands//:workspace_setup_transitive_transitive.bzl", "hedron_compile_commands_setup_transitive_transitive")
+load("@hedron_compile_commands//:workspace_setup_transitive_transitive_transitive.bzl", "hedron_compile_commands_setup_transitive_transitive_transitive")
+
+hedron_compile_commands_setup()
+
+hedron_compile_commands_setup_transitive()
+
+hedron_compile_commands_setup_transitive_transitive()
+
+hedron_compile_commands_setup_transitive_transitive_transitive()

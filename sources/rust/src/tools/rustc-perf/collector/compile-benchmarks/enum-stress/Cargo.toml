@@ -1,0 +1,5 @@
+[package]
+name = "enum-stress"
+version = "0.1.0"
+
+[workspace]

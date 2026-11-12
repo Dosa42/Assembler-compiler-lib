@@ -1,0 +1,495 @@
+use crate::comparison::{
+    ArtifactComparison, ArtifactComparisonSummary, Direction, deserves_attention_icount,
+    write_summary_table,
+};
+use crate::load::SiteCtxt;
+
+use database::{QueuedCommit, metric::Metric};
+
+use crate::github::triage::{TriageBuild, changed_benchmarks, is_triage_run, update_triage_body};
+use crate::github::{COMMENT_MARK_TEMPORARY, RUST_REPO_GITHUB_API_URL};
+use humansize::BINARY;
+use std::fmt::Write;
+
+/// Posts a comment to GitHub summarizing the comparison of the queued commit with its parent
+///
+/// `is_master_commit` is used to differentiate messages for try runs and post-merge runs.
+pub async fn post_comparison_comment(
+    ctxt: &SiteCtxt,
+    commit: QueuedCommit,
+    is_master_commit: bool,
+) -> anyhow::Result<()> {
+    let mut client = super::client::Client::from_ctxt(ctxt, RUST_REPO_GITHUB_API_URL.to_owned());
+    let pr = commit.pr;
+
+    // Scan comments to hide outdated ones and gather context
+    let mut graph_client = super::client::GraphQLClient::from_ctxt(ctxt);
+    for comment in graph_client.get_comments(pr).await? {
+        // If this bot is the author of the comment, the comment is not yet minimized and it is
+        // a temporary comment, minimize it.
+        if comment.viewer_did_author
+            && !comment.is_minimized
+            && comment.body.contains(COMMENT_MARK_TEMPORARY)
+        {
+            log::debug!("Hiding comment {}", comment.id);
+            graph_client.hide_comment(&comment.id, "OUTDATED").await?;
+        }
+    }
+
+    let source = if is_master_commit {
+        PerfRunSource::MasterCommit
+    } else if let Some(mut triage_run) =
+        is_triage_run(&commit, &mut client, &mut graph_client).await?
+    {
+        // Update the triage comment
+        let triage_summary = metrics_result(ctxt, &commit, true)
+            .await
+            .unwrap_or_else(|error| error);
+        match update_triage_body(
+            &mut triage_run.triage_comment.body,
+            pr,
+            format!("{}\n", triage_summary),
+        ) {
+            Ok(()) => {
+                // While in theory this is racy (the comment could have been edited since querying it),
+                // in practice this should never happen
+                if let Err(err) = graph_client
+                    .update_comment_content(
+                        &triage_run.triage_comment.id,
+                        &triage_run.triage_comment.body,
+                    )
+                    .await
+                {
+                    log::error!("Failed to update triage comment: {err:?}")
+                }
+            }
+            Err(err) => log::error!("Failed to update triage body: {err:?}"),
+        }
+
+        PerfRunSource::TriageBuild(triage_run)
+    } else {
+        PerfRunSource::TryBuild
+    };
+
+    if let Some(body) = summarize_run(ctxt, commit, source)
+        .await
+        .unwrap_or_else(Some)
+    {
+        client.post_comment(pr, body).await;
+    }
+
+    Ok(())
+}
+
+fn make_comparison_url(commit: &QueuedCommit, stat: Metric) -> String {
+    format!(
+        "https://perf.rust-lang.org/compare.html?start={}&end={}&stat={}",
+        commit.parent_sha,
+        commit.sha,
+        stat.as_str()
+    )
+}
+
+pub(crate) async fn calculate_metric_comparison(
+    ctxt: &SiteCtxt,
+    parent_sha: &str,
+    head_sha: &str,
+    metric: Metric,
+) -> Result<ArtifactComparison, String> {
+    match crate::comparison::compare(
+        collector::Bound::Commit(parent_sha.to_string()),
+        collector::Bound::Commit(head_sha.to_string()),
+        metric,
+        ctxt,
+    )
+    .await
+    {
+        Ok(Some(c)) => Ok(c),
+        Ok(None) => {
+            Err("Error occurred while categorizing benchmark run (missing comparison).".to_string())
+        }
+        Err(error) => Err(format!(
+            "Error occurred while categorizing benchmark run:\n\n```{error}```"
+        )),
+    }
+}
+
+/// What caused this perf. run to be executed?
+enum PerfRunSource {
+    // PR merged to master
+    MasterCommit,
+    // Manual try build on a PR
+    TryBuild,
+    // A try build on a PR as part of a `@rust-timer triage` command
+    TriageBuild(TriageBuild),
+}
+
+// Should the metric be shown by default in the summary?
+enum DefaultMetricVisibility {
+    Shown,
+    Hidden,
+}
+
+async fn summarize_run(
+    ctxt: &SiteCtxt,
+    commit: QueuedCommit,
+    source: PerfRunSource,
+) -> Result<Option<String>, String> {
+    let benchmark_map = ctxt.get_benchmark_category_map().await;
+
+    let mut message = String::new();
+    if let PerfRunSource::TriageBuild(build) = &source {
+        write!(
+            &mut message,
+            "> [!NOTE]\n> This PR was benchmarked as part of triage of its containing rollup: [triage URL](/rust-lang/rust/pull/{}#issuecomment-{}).\n\n",
+            build.rollup_pr_number,
+            build.triage_comment.full_database_id
+        ).unwrap();
+    }
+
+    write!(
+        &mut message,
+        "Finished benchmarking commit ({sha}): [comparison URL]({comparison_url}).\n\n",
+        sha = commit.sha,
+        comparison_url = make_comparison_url(&commit, Metric::InstructionsUser)
+    )
+    .unwrap();
+
+    let inst_comparison = calculate_metric_comparison(
+        ctxt,
+        &commit.parent_sha,
+        &commit.sha,
+        Metric::InstructionsUser,
+    )
+    .await?;
+
+    let has_broken_benchmarks = !inst_comparison.newly_failed_benchmarks.is_empty();
+    let errors = if has_broken_benchmarks {
+        let benchmarks = inst_comparison
+            .newly_failed_benchmarks
+            .keys()
+            .map(|benchmark| format!("- {benchmark}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let alert_row = ":exclamation: ".repeat(5);
+        // second \n before `alert_row` needed or markdown will render this as appended to last li
+        format!(
+            "\n{alert_row}\n**Warning :warning:**: The following benchmark(s) failed to build:\n{benchmarks}\n\n{alert_row}\n"
+        )
+    } else {
+        String::new()
+    };
+
+    let (inst_primary, inst_secondary) = inst_comparison
+        .clone()
+        .summarize_compile_by_category(&benchmark_map);
+
+    let direction = inst_primary.direction().join(inst_secondary.direction());
+    let overall_result = match direction {
+        Direction::Improvement => "✅ improvements",
+        Direction::Regression => "❌ regressions",
+        Direction::Mixed => "❌✅ regressions and improvements",
+        Direction::None => "no relevant changes",
+    };
+    let deserves_attention = deserves_attention_icount(&inst_primary, &inst_secondary);
+    let is_regression =
+        deserves_attention && matches!(direction, Direction::Regression | Direction::Mixed);
+
+    // Don't post a summary for perf runs that are a part of triage runs, that don't deserve attention
+    // We skip this because it's just another noisy ping,
+    // and only posting it when the results are relevant means people will pay more attention to it if it is posted
+    if let PerfRunSource::TriageBuild(_) = &source
+        && !deserves_attention
+    {
+        return Ok(None);
+    }
+
+    writeln!(
+        &mut message,
+        "### Overall result: {}{}\n",
+        overall_result,
+        if has_broken_benchmarks {
+            " - BENCHMARK(S) FAILED"
+        } else if is_regression {
+            " - please read:"
+        } else {
+            " - no action needed"
+        },
+    )
+    .unwrap();
+
+    const PREVENT_ROLLUP_CUTOFF: usize = 8;
+    let rollup_mode = if !deserves_attention {
+        RollupMode::Allow
+    } else if changed_benchmarks(&inst_comparison).len() < PREVENT_ROLLUP_CUTOFF {
+        RollupMode::Iffy
+    } else {
+        RollupMode::Never
+    };
+    let next_steps = match &source {
+        PerfRunSource::TryBuild => try_run_body(is_regression, rollup_mode),
+        PerfRunSource::MasterCommit | PerfRunSource::TriageBuild(..) => {
+            master_run_body(is_regression)
+        }
+    };
+    writeln!(&mut message, "{next_steps}\n").unwrap();
+
+    if !errors.is_empty() {
+        writeln!(&mut message, "\n{errors}").unwrap();
+        if matches!(source, PerfRunSource::MasterCommit) {
+            writeln!(&mut message, "\ncc @rust-lang/wg-compiler-performance").unwrap();
+        }
+    }
+
+    let bootstrap = summarize_bootstrap(&inst_comparison);
+    let artifact_size = summarize_artifact_size(&inst_comparison);
+
+    write!(
+        &mut message,
+        "{}",
+        metrics_result(ctxt, &commit, false).await?
+    )
+    .unwrap();
+    // never available for triage builds
+    if !matches!(source, PerfRunSource::TriageBuild(_)) {
+        write!(&mut message, "\n{bootstrap}").unwrap();
+    }
+    write!(&mut message, "\n{artifact_size}").unwrap();
+
+    Ok(Some(message))
+}
+
+pub async fn metrics_result(
+    ctxt: &SiteCtxt,
+    commit: &QueuedCommit,
+    collapse_if_irrelevant: bool,
+) -> Result<String, String> {
+    let benchmark_map = ctxt.get_benchmark_category_map().await;
+    let mut metrics_result = String::new();
+    let metrics = vec![
+        (
+            "Instruction count",
+            Metric::InstructionsUser,
+            DefaultMetricVisibility::Shown,
+            calculate_metric_comparison(
+                ctxt,
+                &commit.parent_sha,
+                &commit.sha,
+                Metric::InstructionsUser,
+            )
+            .await?,
+        ),
+        (
+            "Max RSS (memory usage)",
+            Metric::MaxRSS,
+            DefaultMetricVisibility::Hidden,
+            calculate_metric_comparison(ctxt, &commit.parent_sha, &commit.sha, Metric::MaxRSS)
+                .await?,
+        ),
+        (
+            "Cycles",
+            Metric::CyclesUser,
+            DefaultMetricVisibility::Hidden,
+            calculate_metric_comparison(ctxt, &commit.parent_sha, &commit.sha, Metric::CyclesUser)
+                .await?,
+        ),
+        (
+            "Binary size",
+            Metric::LinkedArtifactSize,
+            DefaultMetricVisibility::Hidden,
+            calculate_metric_comparison(
+                ctxt,
+                &commit.parent_sha,
+                &commit.sha,
+                Metric::LinkedArtifactSize,
+            )
+            .await?,
+        ),
+    ];
+
+    let instructions_irrelevant = metrics[0]
+        .3
+        .compile_comparisons
+        .iter()
+        .all(|c| !c.comparison.is_relevant());
+    let collapse = collapse_if_irrelevant && instructions_irrelevant;
+    if collapse {
+        write!(metrics_result, "<details>\n<summary>This perf run didn't have relevant results for the `instruction count` metric.</summary>\n\n").unwrap();
+    }
+
+    for (title, metric, visibility, comparison) in metrics {
+        write!(
+            metrics_result,
+            "\n### [{title}]({})\n",
+            make_comparison_url(commit, metric)
+        )
+        .unwrap();
+
+        let (primary, secondary) = comparison.summarize_compile_by_category(&benchmark_map);
+        write_metric_summary(primary, secondary, visibility, &mut metrics_result);
+    }
+
+    if collapse {
+        writeln!(metrics_result, "</details>").unwrap();
+    }
+
+    Ok(metrics_result)
+}
+
+fn summarize_artifact_size(comparison: &ArtifactComparison) -> String {
+    let size_prev = comparison.a.component_sizes.values().sum::<u64>();
+    let size_current = comparison.b.component_sizes.values().sum::<u64>();
+    if size_prev == 0 || size_current == 0 {
+        return "**Artifact size**: missing data".to_string();
+    }
+
+    let change = (size_current as f64 / size_prev as f64) - 1.0;
+    let change = change * 100.0;
+
+    format!(
+        "**Artifact size**: {} -> {} ({change:.2}%)",
+        humansize::format_size(size_prev, BINARY),
+        humansize::format_size(size_current, BINARY)
+    )
+}
+
+fn summarize_bootstrap(comparison: &ArtifactComparison) -> String {
+    let prev_s = comparison.a.bootstrap_total as f64 / 1e9;
+    let current_s = comparison.b.bootstrap_total as f64 / 1e9;
+
+    if prev_s == 0.0 || current_s == 0.0 {
+        return "**Bootstrap**: missing data".to_string();
+    }
+
+    let change = (current_s / prev_s) - 1.0;
+    let change = change * 100.0;
+
+    format!("**Bootstrap**: {prev_s}s -> {current_s}s ({change:.2}%)")
+}
+
+fn write_metric_summary(
+    primary: ArtifactComparisonSummary,
+    secondary: ArtifactComparisonSummary,
+    visibility: DefaultMetricVisibility,
+    message: &mut String,
+) {
+    if !primary.is_relevant() && !secondary.is_relevant() {
+        message.push_str("This perf run didn't have relevant results for this metric.\n");
+    } else {
+        match visibility {
+            DefaultMetricVisibility::Shown => {
+                message.push_str(
+                    "Our most reliable metric. Used to determine the overall result above. \
+                However, even this metric can be noisy.\n\n",
+                );
+                write_summary_table(&primary, &secondary, false, message);
+            }
+            DefaultMetricVisibility::Hidden => {
+                let format_summary =
+                    |buffer: &mut Vec<String>, label: &str, summary: &ArtifactComparisonSummary| {
+                        if summary.is_relevant() {
+                            buffer.push(format!(
+                                "{label} {:.1}%",
+                                summary.arithmetic_mean_of_changes()
+                            ));
+                        }
+                    };
+
+                // At this point, we know that at least one of primary or secondary are relevant
+                let mut results = vec![];
+                format_summary(&mut results, "primary", &primary);
+                format_summary(&mut results, "secondary", &secondary);
+
+                let summary = format!("Results ({})", results.join(", "));
+
+                // `<details>` means it is hidden, requiring a click to reveal.
+                message.push_str(&format!("<details>\n<summary>{summary}</summary>\n\n"));
+                message.push_str(
+                    "A less reliable metric. May be of interest, but not \
+                used to determine the overall result above.\n\n",
+                );
+                write_summary_table(&primary, &secondary, false, message);
+                message.push_str("</details>\n");
+            }
+        }
+    }
+}
+
+fn master_run_body(is_regression: bool) -> String {
+    if is_regression {
+        r#"
+Our benchmarks found a performance regression caused by this PR.
+This might be an actual regression, but it can also be just noise.
+
+**Next Steps**:
+
+- If the regression was expected or you think it can be justified,
+please write a comment with sufficient written justification, and add
+`@rustbot label: +perf-regression-triaged` to it, to mark the regression as triaged.
+- If you think that you know of a way to resolve the regression, try to create
+a new PR with a fix for the regression.
+- If you do not understand the regression or you think that it is just noise,
+you can ask the `@rust-lang/wg-compiler-performance` working group for help (members of this group
+were already notified of this PR).
+
+@rustbot label: +perf-regression
+cc @rust-lang/wg-compiler-performance
+"#
+    } else {
+        "
+@rustbot label: -perf-regression
+"
+    }
+    .to_string()
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum RollupMode {
+    Allow,
+    Iffy,
+    Never,
+}
+
+fn try_run_body(is_regression: bool, rollup_mode: RollupMode) -> String {
+    let next_steps = if is_regression {
+        "\n\n**Next, please**: If you can, justify the regressions found in \
+            this try perf run in writing \
+            along with `@rustbot label: +perf-regression-triaged`. If not, \
+            fix the regressions and do another perf run. \
+            Neutral or positive results will clear the label automatically."
+    } else {
+        ""
+    };
+
+    // We mark PRs as rollup=never if perf deserves attention, so we don't need to debug the perf in the rollup
+    // We don't remove `rollup=never` if perf does not deserve attention, as sometimes there are multiple perf. runs on the same PR,
+    // and it's not always the case that the latest version that gets approved is the one for which we ran perf.
+    //
+    // We set the PR note to "rustc-perf", which will be interpreted by bors to mark the PR
+    // as having significant performance results.
+    let rollup_instructions = match rollup_mode {
+        RollupMode::Allow => "",
+        RollupMode::Iffy => "@bors rollup=iffy rustc-perf",
+        RollupMode::Never => "@bors rollup=never rustc-perf",
+    };
+
+    // If perf does not deserve attention, don't say that the PR was automatically marked as not fit for rolling up
+    // But point out that it can be manually marked as such
+    let rollup_comment = if rollup_mode == RollupMode::Never {
+        "It's automatically marked not fit for rolling up. \
+Overriding is possible but disadvised: \
+it risks changing compiler perf."
+    } else {
+        "Consider adding rollup=never if this change is not fit for rolling up."
+    };
+
+    let sign = if is_regression { "+" } else { "-" };
+    format!(
+        "
+Benchmarking means the PR may be perf-sensitive. \
+{rollup_comment}{next_steps}
+
+{rollup_instructions}
+@rustbot label: -S-waiting-on-perf {sign}perf-regression",
+    )
+}

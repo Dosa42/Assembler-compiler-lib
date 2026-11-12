@@ -1,0 +1,60 @@
+[package]
+authors = ["The Rust Compiler Team"]
+name = "collector"
+version = "0.1.0"
+edition = "2024"
+description = "Collects Rust performance data"
+rust-version = { workspace = true }
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+clap = { workspace = true, features = ["derive", "env"] }
+env_logger = { workspace = true }
+hashbrown = { workspace = true }
+log = { workspace = true }
+reqwest = { workspace = true, features = ["blocking", "json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "process", "fs"] }
+
+cfg-if = "1"
+thiserror = "2"
+tempfile = "3"
+libc = "0.2"
+semver = "1.0"
+xz2 = "0.1.3"
+tar = "0.4"
+futures = "0.3.5"
+jobserver = "0.1.33"
+snap = "1"
+walkdir = "2"
+flate2 = { version = "1.0.22", features = ["rust_backend"] }
+rayon = "1"
+cargo_metadata = "0.23"
+thousands = "0.2.0"
+rustc-demangle = { version = "0.1", features = ["std"] }
+similar = "3"
+console = "0.16"
+object = "0.39"
+tabled = { version = "0.21", default-features = false, features = ["derive", "ansi"] }
+humansize = "2.1.3"
+regex = "1.7.1"
+analyzeme = "12.0.0"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+
+object_store = { version = "0.14", features = ["aws"], optional = true }
+
+benchlib = { path = "benchlib" }
+database = { path = "../database" }
+
+[target.'cfg(windows)'.dependencies]
+miow = "0.3"
+windows-sys = { version = "0.61.0", features = ["Win32_Foundation"] }
+
+[features]
+# Enable more precise Cachegrind profiles for runtime benchmarks.
+# Requires a recent Valgrind to be installed.
+# Pass DEP_VALGRIND=<path-to-valgrind>/include environment variable when building.
+precise-cachegrind = []
+s3-sdk = ["dep:object_store"]

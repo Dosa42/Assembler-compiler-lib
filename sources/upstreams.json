@@ -74,7 +74,171 @@
       ],
       "imported_at": "2026-11-12T06:10:34.014673+00:00",
       "verification": "Imported Git tree SHA matches upstream Git tree SHA"
+    },
+    {
+      "upstream_tree": "a0e49c137401a4b60b78c787405deaf49dcc46b8",
+      "tree": "44591834890b6006263f2c56555fa7543634ad9c",
+      "file_count": 432744,
+      "submodules": [
+        {
+          "path": "library/backtrace",
+          "url": "https://github.com/rust-lang/backtrace-rs.git",
+          "commit": "d902726a1dcdc1e1c66f73d1162181b5423c645b",
+          "upstream_tree": "7f55c64f163ee354275bc92f21496620737401eb",
+          "tree": "7f55c64f163ee354275bc92f21496620737401eb",
+          "file_count": 102
+        },
+        {
+          "path": "src/doc/book",
+          "url": "https://github.com/rust-lang/book.git",
+          "commit": "2771df165f092a4fbb9f46b5b2e7450f19010adb",
+          "upstream_tree": "fa2ca471ff1546526a0593a8ed05ba7864910bc0",
+          "tree": "fa2ca471ff1546526a0593a8ed05ba7864910bc0",
+          "file_count": 2653
+        },
+        {
+          "path": "src/doc/edition-guide",
+          "url": "https://github.com/rust-lang/edition-guide.git",
+          "commit": "ab8544aeed7b792984366aa122ac19bd47ad9a2f",
+          "upstream_tree": "25a42fc345f10984def6f034811803af40075377",
+          "tree": "25a42fc345f10984def6f034811803af40075377",
+          "file_count": 64
+        },
+        {
+          "path": "src/doc/embedded-book",
+          "url": "https://github.com/rust-embedded/book.git",
+          "commit": "637b4a0244e16ec391a60184ae0c86b550ffc24b",
+          "upstream_tree": "4fdf43a6102d9ed887921fd4ece61112a9147dfa",
+          "tree": "4fdf43a6102d9ed887921fd4ece61112a9147dfa",
+          "file_count": 63
+        },
+        {
+          "path": "src/doc/nomicon",
+          "url": "https://github.com/rust-lang/nomicon.git",
+          "commit": "b0bb569883a3e65ab19d4f1adf1b8dbc1629d0a6",
+          "upstream_tree": "941b0dcacfff2469d4de97145a6a4a460999929a",
+          "tree": "941b0dcacfff2469d4de97145a6a4a460999929a",
+          "file_count": 73
+        },
+        {
+          "path": "src/doc/reference",
+          "url": "https://github.com/rust-lang/reference.git",
+          "commit": "a2ae66d7037cbedac68746b9510b24cc34b96d69",
+          "upstream_tree": "49161cbbf7eb7586fb602c036df073011f0129fc",
+          "tree": "49161cbbf7eb7586fb602c036df073011f0129fc",
+          "file_count": 213
+        },
+        {
+          "path": "src/doc/rust-by-example",
+          "url": "https://github.com/rust-lang/rust-by-example.git",
+          "commit": "dcc14f912bf8790792a2df082eddc82ab2539229",
+          "upstream_tree": "d92301122906df8bc4cf079dcacecbe2dfacbb0a",
+          "tree": "d92301122906df8bc4cf079dcacecbe2dfacbb0a",
+          "file_count": 217
+        },
+        {
+          "path": "src/gcc",
+          "url": "https://github.com/rust-lang/gcc.git",
+          "commit": "e1c6e07b095d091177376a163da44039475e05e3",
+          "upstream_tree": "b716e347f1833dd2f4f2d7ad4f6abb3bddc3ef96",
+          "tree": "b716e347f1833dd2f4f2d7ad4f6abb3bddc3ef96",
+          "file_count": 163362
+        },
+        {
+          "path": "src/llvm-project",
+          "url": "https://github.com/rust-lang/llvm-project.git",
+          "commit": "0a5579eb649d3634a9c30ac873300cc2944fa070",
+          "upstream_tree": "873cbd3d36f1a3911e1afd8233501bcefacda3f7",
+          "tree": "873cbd3d36f1a3911e1afd8233501bcefacda3f7",
+          "file_count": 180651
+        },
+        {
+          "path": "src/tools/cargo",
+          "url": "https://github.com/rust-lang/cargo.git",
+          "commit": "ede6cefea9731cb595942338824c2f9a610b8189",
+          "upstream_tree": "22a68776b91b5130a0acad8c88caa6f6e0fb616f",
+          "tree": "22a68776b91b5130a0acad8c88caa6f6e0fb616f",
+          "file_count": 3090
+        },
+        {
+          "path": "src/tools/enzyme",
+          "url": "https://github.com/rust-lang/enzyme.git",
+          "commit": "9cff5a8afebc22748bb36c135dfe5a09dd1047f3",
+          "upstream_tree": "388539fecb80a365724c37f993647db68f3db497",
+          "tree": "388539fecb80a365724c37f993647db68f3db497",
+          "file_count": 2098
+        },
+        {
+          "path": "src/tools/rustc-perf",
+          "url": "https://github.com/rust-lang/rustc-perf.git",
+          "commit": "15d95905429e577d5a710b17c49e04b4451c263b",
+          "upstream_tree": "0aeee05c8e0c71c380d9bdec91ce621a4a6aca82",
+          "tree": "0aeee05c8e0c71c380d9bdec91ce621a4a6aca82",
+          "file_count": 15032
+        },
+        {
+          "path": "src/tpde",
+          "url": "https://github.com/rust-lang/tpde.git",
+          "commit": "9779acf4ada3736e779391da1e4b3369dba08024",
+          "upstream_tree": "95b018348b5cfb80cda54e3d17aa0352b3551ad2",
+          "tree": "f6c04a07a7d632483c08f26b48077d108329cb4c",
+          "file_count": 702
+        },
+        {
+          "path": "src/tpde/deps/args",
+          "url": "https://github.com/Taywee/args.git",
+          "commit": "cc2368ca0d8a962862c96c00fe919e1480050f51",
+          "upstream_tree": "dc5b3cbd461064e319e5a5e0789c22a959cce9d1",
+          "tree": "dc5b3cbd461064e319e5a5e0789c22a959cce9d1",
+          "file_count": 34
+        },
+        {
+          "path": "src/tpde/deps/disarm",
+          "url": "https://github.com/aengelke/disarm.git",
+          "commit": "2d13d3f410a52daff1c5d8ef07d623332f372560",
+          "upstream_tree": "c24e10a55873a8885203d0f8b9b739f489106250",
+          "tree": "c24e10a55873a8885203d0f8b9b739f489106250",
+          "file_count": 43
+        },
+        {
+          "path": "src/tpde/deps/doxygen-awesome-css",
+          "url": "https://github.com/jothepro/doxygen-awesome-css.git",
+          "commit": "9760c30014131f4eacb8e96f15f3869c7bc5dd8c",
+          "upstream_tree": "1ccaf4a54b71b468a3747861e2c8e73baaa513af",
+          "tree": "1ccaf4a54b71b468a3747861e2c8e73baaa513af",
+          "file_count": 36
+        },
+        {
+          "path": "src/tpde/deps/fadec",
+          "url": "https://github.com/aengelke/fadec.git",
+          "commit": "3994d89500985491b1a7ccc17827a22058b3de49",
+          "upstream_tree": "d90da517cc944484d6128c63242ebb6124d16d5f",
+          "tree": "d90da517cc944484d6128c63242ebb6124d16d5f",
+          "file_count": 22
+        },
+        {
+          "path": "src/tpde/deps/spdlog",
+          "url": "https://github.com/gabime/spdlog.git",
+          "commit": "27cb4c76708608465c413f6d0e6b8d99a4d84302",
+          "upstream_tree": "5e163e9936c841266c2c301d44f6c4cbe89bd664",
+          "tree": "5e163e9936c841266c2c301d44f6c4cbe89bd664",
+          "file_count": 172
+        }
+      ],
+      "path": "sources/rust",
+      "url": "https://github.com/rust-lang/rust.git",
+      "branch": "main",
+      "commit": "ee8268e23d0e2e308b52e4f63df69afb69bc61a4",
+      "components": [
+        "Rust compiler",
+        "Cargo",
+        "Clippy",
+        "rustfmt",
+        "Rust standard library"
+      ],
+      "imported_at": "2026-11-12T07:31:46.836533+00:00",
+      "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
     }
   ],
-  "updated_at": "2026-11-12T06:10:34.019244+00:00"
+  "updated_at": "2026-11-12T07:31:46.836559+00:00"
 }

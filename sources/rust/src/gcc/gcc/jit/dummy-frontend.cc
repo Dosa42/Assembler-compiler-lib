@@ -1,0 +1,1331 @@
+/* jit.c -- Dummy "frontend" for use during JIT-compilation.
+   Copyright (C) 2013-2026 Free Software Foundation, Inc.
+
+This file is part of GCC.
+
+GCC is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free
+Software Foundation; either version 3, or (at your option) any later
+version.
+
+GCC is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+for more details.
+
+You should have received a copy of the GNU General Public License
+along with GCC; see the file COPYING3.  If not see
+<http://www.gnu.org/licenses/>.  */
+
+#include "config.h"
+#include "system.h"
+#include "coretypes.h"
+#include "target.h"
+#include "jit-playback.h"
+#include "stor-layout.h"
+#include "debug.h"
+#include "langhooks.h"
+#include "langhooks-def.h"
+#include "diagnostic.h"
+#include "options.h"
+#include "stringpool.h"
+#include "attribs.h"
+#include "attr-handlers.h"
+#include "cgraph.h"
+#include "target.h"
+#include "diagnostics/text-sink.h"
+#include "print-tree.h"
+#include "common/common-target.h"
+
+#include <mpfr.h>
+#include <unordered_map>
+
+using namespace gcc::jit;
+
+/* Attribute handling.  These are the libgccjit-specific attribute handlers;
+   the handlers shared with the C family live in gcc/attr-handlers.cc.  */
+
+/* In a FIELD_DECL, nonzero if the decl was originally a bitfield.  */
+#define DECL_C_BIT_FIELD(NODE) \
+  (DECL_LANG_FLAG_4 (FIELD_DECL_CHECK (NODE)) == 1)
+
+/* This is needed as the function is used by the `size_int` macro.  */
+tree
+size_int_kind (poly_int64 number, enum size_type_kind kind);
+
+/* Attribute handling.  */
+
+static tree handle_packed_attribute (tree *, tree, tree, int, bool *);
+static tree handle_aligned_attribute (tree *node, tree name, tree args,
+				      int flags, bool *no_add_attrs);
+static tree handle_cold_attribute (tree *, tree, tree, int, bool *);
+static tree handle_common_attribute (tree *, tree, tree, int, bool *);
+static tree handle_format_arg_attribute (tree *, tree, tree, int, bool *);
+static tree handle_format_attribute (tree *, tree, tree, int, bool *);
+static tree handle_nonnull_attribute (tree *, tree, tree, int, bool *);
+static tree handle_noreturn_attribute (tree *, tree, tree, int, bool *);
+static tree handle_patchable_function_entry_attribute (tree *, tree, tree,
+						       int, bool *);
+static tree handle_sentinel_attribute (tree *, tree, tree, int, bool *);
+static tree handle_transaction_pure_attribute (tree *, tree, tree, int, bool *);
+
+/* Helper to define attribute exclusions.  */
+#define ATTR_EXCL(name, function, type, variable)	\
+  { name, function, type, variable }
+
+/* Define attributes that are mutually exclusive with one another.  */
+extern const struct attribute_spec::exclusions attr_aligned_exclusions[] =
+{
+  /* Attribute name     exclusion applies to:
+	                function, type, variable */
+  ATTR_EXCL ("aligned", true, false, false),
+  ATTR_EXCL ("packed", true, false, false),
+  ATTR_EXCL (NULL, false, false, false)
+};
+
+static const struct attribute_spec::exclusions attr_common_exclusions[] =
+{
+  ATTR_EXCL ("common", true, true, true),
+  ATTR_EXCL ("nocommon", true, true, true),
+  ATTR_EXCL (NULL, false, false, false),
+};
+
+/* These variables act as a cache for the target builtins. This is needed in
+   order to be able to type-check the calls since we can only get those types
+   in the playback phase while we need them in the recording phase.  */
+hash_map<nofree_string_hash, tree> target_builtins{};
+std::unordered_map<std::string, recording::function_type*> target_function_types
+{};
+recording::context target_builtins_ctxt{NULL};
+
+/* Table of machine-independent attributes supported in libgccjit.  */
+static const attribute_spec jit_gnu_attributes[] =
+{
+  /* { name, min_len, max_len, decl_req, type_req, fn_type_req,
+       affects_type_identity, handler, exclude } */
+  { "alias",		      1, 1, true,  false, false, false,
+			      handle_alias_attribute, NULL },
+  { "aligned",                0, 1, false, false, false, false,
+			      handle_aligned_attribute,
+			      attr_aligned_exclusions },
+  { "always_inline",	      0, 0, true,  false, false, false,
+			      handle_always_inline_attribute,
+			      attr_always_inline_exclusions },
+  { "cold",		      0, 0, true,  false, false, false,
+			      handle_cold_attribute,
+			      attr_cold_hot_exclusions },
+  { "common",                 0, 0, true,  false, false, false,
+			      handle_common_attribute,
+	                      attr_common_exclusions },
+  /* The same comments as for noreturn attributes apply to const ones.  */
+  { "const",		      0, 0, true,  false, false, false,
+			      handle_const_attribute,
+			      attr_const_pure_exclusions },
+  { "fn spec",		      1, 1, false, true, true, false,
+			      handle_fnspec_attribute, NULL },
+
+  { "leaf",		      0, 0, true,  false, false, false,
+			      handle_leaf_attribute, NULL },
+  { "malloc",		      0, 0, true,  false, false, false,
+			      handle_malloc_common, attr_alloc_exclusions },
+  { "may_alias",	      0, 0, false, true, false, false, NULL, NULL },
+  { "noreturn",		      0, 0, true,  false, false, false,
+			      handle_noreturn_attribute,
+			      attr_noreturn_exclusions },
+  { "no vops",		      0, 0, true,  false, false, false,
+			      handle_novops_attribute, NULL },
+  { "noinline",		      0, 0, true,  false, false, false,
+			      handle_noinline_attribute,
+			      attr_noinline_exclusions },
+  { "nonnull",		      0, -1, false, true, true, false,
+			      handle_nonnull_attribute, NULL },
+  { "nothrow",		      0, 0, true,  false, false, false,
+			      handle_nothrow_attribute, NULL },
+  { "packed",                 0, 0, false, false, false, false,
+			      handle_packed_attribute,
+	                      attr_aligned_exclusions },
+  { "patchable_function_entry", 1, 2, true, false, false, false,
+			      handle_patchable_function_entry_attribute,
+			      NULL },
+  { "pure",		      0, 0, true,  false, false, false,
+			      handle_pure_attribute,
+			      attr_const_pure_exclusions },
+  { "retain",                 0, 0, true,  false, false, false,
+			      handle_retain_attribute, NULL },
+  { "returns_twice",	      0, 0, true,  false, false, false,
+			      handle_returns_twice_attribute,
+			      attr_returns_twice_exclusions },
+  { "section",                1, 1, true,  false, false, false,
+			      handle_section_attribute, attr_section_exclusions },
+  { "sentinel",		      0, 1, false, true, true, false,
+			      handle_sentinel_attribute, NULL },
+  { "target",		      1, -1, true, false, false, false,
+			      handle_target_attribute, attr_target_exclusions },
+  { "type generic",	      0, 0, false, true, true, false,
+			      handle_type_generic_attribute, NULL },
+  { "transaction_pure",	      0, 0, false, true, true, false,
+			      handle_transaction_pure_attribute, NULL },
+  { "used",		      0, 0, true,  false, false, false,
+			      handle_used_attribute, NULL },
+  { "visibility",	      1, 1, false, false, false, false,
+			      handle_visibility_attribute, NULL },
+  { "weak",		      0, 0, true,  false, false, false,
+			      handle_weak_attribute, NULL },
+  /* For internal use only.  The leading '*' both prevents its usage in
+     source code and signals that it may be overridden by machine tables.  */
+  { "*tm regparm",	      0, 0, false, true, true, false,
+			      ignore_attribute, NULL },
+};
+
+static const scoped_attribute_specs jit_gnu_attribute_table =
+{
+  "gnu", { jit_gnu_attributes }
+};
+
+/* Give the specifications for the format attributes, used by C and all
+   descendants.  */
+
+static const attribute_spec jit_format_attributes[] =
+{
+  /* { name, min_len, max_len, decl_req, type_req, fn_type_req,
+       affects_type_identity, handler, exclude } */
+  { "format",		      3, 3, false, true,  true, false,
+			      handle_format_attribute, NULL },
+  { "format_arg",             1, 1, false, true,  true, false,
+			      handle_format_arg_attribute, NULL }
+};
+
+static const scoped_attribute_specs jit_format_attribute_table =
+{
+  "gnu", { jit_format_attributes }
+};
+
+static const scoped_attribute_specs *const jit_attribute_table[] =
+{
+  &jit_gnu_attribute_table,
+  &jit_format_attribute_table
+};
+
+char* jit_personality_func_name = NULL;
+const char* jit_lang_name = NULL;
+static tree personality_decl;
+
+/* FIXME: This is a hack to preserve trees that we create from the
+   garbage collector.  */
+
+static GTY (()) tree jit_gc_root;
+
+void
+jit_preserve_from_gc (tree t)
+{
+  jit_gc_root = tree_cons (NULL_TREE, t, jit_gc_root);
+}
+
+/* Attribute handlers.  */
+
+/* Attribute handlers specific to libgccjit.  If the attribute handler code
+   is the same as the one in `c-family/c-attribs.cc`, please move the
+   handler into `attr-handlers.cc`.  */
+
+
+/* Handle a "noreturn" attribute; arguments as in
+   struct attribute_spec.handler.  */
+
+static tree
+handle_noreturn_attribute (tree *node, tree ARG_UNUSED (name),
+			   tree ARG_UNUSED (args), int ARG_UNUSED (flags),
+			   bool * ARG_UNUSED (no_add_attrs))
+{
+  tree type = TREE_TYPE (*node);
+
+  if (TREE_CODE (*node) == FUNCTION_DECL)
+    TREE_THIS_VOLATILE (*node) = 1;
+  else if (TREE_CODE (type) == POINTER_TYPE
+	   && TREE_CODE (TREE_TYPE (type)) == FUNCTION_TYPE)
+    TREE_TYPE (*node)
+      = build_pointer_type
+	(build_type_variant (TREE_TYPE (type),
+			     TYPE_READONLY (TREE_TYPE (type)), 1));
+  else
+    gcc_unreachable ();
+
+  return NULL_TREE;
+}
+
+/* Helper for nonnull attribute handling; fetch the operand number
+   from the attribute argument list.  */
+
+static bool
+get_nonnull_operand (tree arg_num_expr, unsigned HOST_WIDE_INT *valp)
+{
+  /* Verify the arg number is a constant.  */
+  if (!tree_fits_uhwi_p (arg_num_expr))
+    return false;
+
+  *valp = TREE_INT_CST_LOW (arg_num_expr);
+  return true;
+}
+
+/* Handle the "nonnull" attribute.  */
+
+static tree
+handle_nonnull_attribute (tree *node, tree ARG_UNUSED (name),
+			  tree args, int ARG_UNUSED (flags),
+			  bool * ARG_UNUSED (no_add_attrs))
+{
+  tree type = *node;
+
+  /* If no arguments are specified, all pointer arguments should be
+     non-null.  Verify a full prototype is given so that the arguments
+     will have the correct types when we actually check them later.
+     Avoid diagnosing type-generic built-ins since those have no
+     prototype.  */
+  if (!args)
+    {
+      gcc_assert (prototype_p (type)
+		  || !TYPE_ATTRIBUTES (type)
+		  || lookup_attribute ("type generic", TYPE_ATTRIBUTES (type)));
+
+      return NULL_TREE;
+    }
+
+  /* Argument list specified.  Verify that each argument number references
+     a pointer argument.  */
+  for (; args; args = TREE_CHAIN (args))
+    {
+      tree argument;
+      unsigned HOST_WIDE_INT arg_num = 0, ck_num;
+
+      if (!get_nonnull_operand (TREE_VALUE (args), &arg_num))
+	gcc_unreachable ();
+
+      argument = TYPE_ARG_TYPES (type);
+      if (argument)
+	{
+	  for (ck_num = 1; ; ck_num++)
+	    {
+	      if (!argument || ck_num == arg_num)
+		break;
+	      argument = TREE_CHAIN (argument);
+	    }
+
+	  gcc_assert (argument
+		      && TREE_CODE (TREE_VALUE (argument)) == POINTER_TYPE);
+	}
+    }
+
+  return NULL_TREE;
+}
+
+/* Handle a "sentinel" attribute.  */
+
+static tree
+handle_sentinel_attribute (tree *node, tree ARG_UNUSED (name), tree args,
+			   int ARG_UNUSED (flags),
+			   bool * ARG_UNUSED (no_add_attrs))
+{
+  gcc_assert (stdarg_p (*node));
+
+  if (args)
+    {
+      tree position = TREE_VALUE (args);
+      gcc_assert (TREE_CODE (position) == INTEGER_CST);
+      if (tree_int_cst_lt (position, integer_zero_node))
+	gcc_unreachable ();
+    }
+
+  return NULL_TREE;
+}
+
+/* Handle a "transaction_pure" attribute.  */
+
+static tree
+handle_transaction_pure_attribute (tree *node, tree ARG_UNUSED (name),
+				   tree ARG_UNUSED (args),
+				   int ARG_UNUSED (flags),
+				   bool * ARG_UNUSED (no_add_attrs))
+{
+  /* Ensure we have a function type.  */
+  gcc_assert (TREE_CODE (*node) == FUNCTION_TYPE);
+
+  return NULL_TREE;
+}
+
+/* Handle a "cold" and attribute; arguments as in
+   struct attribute_spec.handler.  */
+
+static tree
+handle_cold_attribute (tree *node, tree name, tree ARG_UNUSED (args),
+		       int ARG_UNUSED (flags), bool *no_add_attrs)
+{
+  if (TREE_CODE (*node) == FUNCTION_DECL
+      || TREE_CODE (*node) == LABEL_DECL)
+    {
+      /* Attribute cold processing is done later with lookup_attribute.  */
+    }
+  else
+    {
+      warning (OPT_Wattributes, "%qE attribute ignored", name);
+      *no_add_attrs = true;
+    }
+
+  return NULL_TREE;
+}
+
+/* Handle a "common" attribute; arguments as in
+   struct attribute_spec.handler.  */
+
+static tree
+handle_common_attribute (tree *node, tree name, tree ARG_UNUSED (args),
+			 int ARG_UNUSED (flags), bool *no_add_attrs)
+{
+  if (VAR_P (*node))
+    DECL_COMMON (*node) = 1;
+  else
+    {
+      warning (OPT_Wattributes, "%qE attribute ignored", name);
+      *no_add_attrs = true;
+    }
+
+  return NULL_TREE;
+}
+
+static tree
+handle_patchable_function_entry_attribute (tree *, tree, tree, int, bool *)
+{
+  /* Nothing to be done here.  */
+  return NULL_TREE;
+}
+
+/* Handle a "format" attribute; arguments as in
+   struct attribute_spec.handler.  */
+
+static tree
+handle_format_attribute (tree * ARG_UNUSED (node), tree ARG_UNUSED (name),
+			 tree ARG_UNUSED (args), int ARG_UNUSED (flags),
+			 bool *no_add_attrs)
+{
+  *no_add_attrs = true;
+  return NULL_TREE;
+}
+
+
+/* Handle a "format_arg" attribute; arguments as in
+   struct attribute_spec.handler.  */
+
+tree
+handle_format_arg_attribute (tree * ARG_UNUSED (node), tree ARG_UNUSED (name),
+			     tree ARG_UNUSED (args), int ARG_UNUSED (flags),
+			     bool *no_add_attrs)
+{
+  *no_add_attrs = true;
+  return NULL_TREE;
+}
+
+/* Handle a "packed" attribute; arguments as in
+   struct attribute_spec.handler.  */
+
+static tree
+handle_packed_attribute (tree *node, tree name, tree ARG_UNUSED (args),
+			 int flags, bool *no_add_attrs)
+{
+  if (TYPE_P (*node))
+    {
+      if (!(flags & (int) ATTR_FLAG_TYPE_IN_PLACE))
+	{
+	  warning (OPT_Wattributes,
+		   "%qE attribute ignored for type %qT", name, *node);
+	  *no_add_attrs = true;
+	}
+      else
+	TYPE_PACKED (*node) = 1;
+    }
+  else if (TREE_CODE (*node) == FIELD_DECL)
+    {
+      if (TYPE_ALIGN (TREE_TYPE (*node)) <= BITS_PER_UNIT
+	  /* Still pack bitfields.  */
+	  && ! DECL_C_BIT_FIELD (*node))
+	warning (OPT_Wattributes,
+		 "%qE attribute ignored for field of type %qT",
+		 name, TREE_TYPE (*node));
+      else
+	DECL_PACKED (*node) = 1;
+    }
+  /* We can't set DECL_PACKED for a VAR_DECL, because the bit is
+     used for DECL_REGISTER.  It wouldn't mean anything anyway.
+     We can't set DECL_PACKED on the type of a TYPE_DECL, because
+     that changes what the typedef is typing.  */
+  else
+    {
+      warning (OPT_Wattributes, "%qE attribute ignored", name);
+      *no_add_attrs = true;
+    }
+
+  return NULL_TREE;
+}
+
+
+static int
+check_user_alignment (const_tree align, bool objfile, bool warn_zero)
+{
+  if (error_operand_p (align))
+    return -1;
+
+  if (TREE_CODE (align) != INTEGER_CST
+      || !INTEGRAL_TYPE_P (TREE_TYPE (align)))
+    {
+      error ("requested alignment is not an integer constant");
+      return -1;
+    }
+
+  if (integer_zerop (align))
+    {
+      if (warn_zero)
+	warning (OPT_Wattributes,
+		 "requested alignment %qE is not a positive power of 2",
+		 align);
+      return -1;
+    }
+
+  /* Log2 of the byte alignment ALIGN.  */
+  int log2align;
+  if (tree_int_cst_sgn (align) == -1
+      || (log2align = tree_log2 (align)) == -1)
+    {
+      error ("requested alignment %qE is not a positive power of 2",
+	     align);
+      return -1;
+    }
+
+  if (objfile)
+    {
+      unsigned maxalign = MAX_OFILE_ALIGNMENT / BITS_PER_UNIT;
+      if (!tree_fits_uhwi_p (align) || tree_to_uhwi (align) > maxalign)
+	{
+	  error ("requested alignment %qE exceeds object file maximum %u",
+		 align, maxalign);
+	  return -1;
+	}
+    }
+
+  if (log2align >= HOST_BITS_PER_INT - LOG2_BITS_PER_UNIT)
+    {
+      error ("requested alignment %qE exceeds maximum %u",
+	     align, 1U << (HOST_BITS_PER_INT - LOG2_BITS_PER_UNIT - 1));
+      return -1;
+    }
+
+  return log2align;
+}
+
+/* Common codes shared by handle_warn_if_not_aligned_attribute and
+   handle_aligned_attribute.  */
+
+static tree
+common_handle_aligned_attribute (tree *node, tree name, tree args, int flags,
+				 bool *no_add_attrs,
+				 bool warn_if_not_aligned_p)
+{
+  tree decl = NULL_TREE;
+  tree *type = NULL;
+  bool is_type = false;
+  tree align_expr;
+
+  /* The last (already pushed) declaration with all validated attributes
+     merged in or the current about-to-be-pushed one if one hasn't been
+     yet.  */
+  tree last_decl = node[1] ? node[1] : *node;
+
+  if (args)
+    {
+      align_expr = TREE_VALUE (args);
+      /* FIXME: Uncomment this code or find a way to use `default_conversion`.
+      if (align_expr && TREE_CODE (align_expr) != IDENTIFIER_NODE
+	  && TREE_CODE (align_expr) != FUNCTION_DECL)
+	align_expr = default_conversion (align_expr);*/
+    }
+  else
+    align_expr = size_int (ATTRIBUTE_ALIGNED_VALUE / BITS_PER_UNIT);
+
+  if (DECL_P (*node))
+    {
+      decl = *node;
+      type = &TREE_TYPE (decl);
+      is_type = TREE_CODE (*node) == TYPE_DECL;
+    }
+  else if (TYPE_P (*node))
+    type = node, is_type = true;
+
+  /* True to consider invalid alignments greater than MAX_OFILE_ALIGNMENT.  */
+  bool objfile = (TREE_CODE (*node) == FUNCTION_DECL
+		  || (VAR_P (*node) && TREE_STATIC (*node)));
+  /* Log2 of specified alignment.  */
+  int pow2align = check_user_alignment (align_expr, objfile,
+					/* warn_zero = */ true);
+  if (pow2align == -1)
+    {
+      *no_add_attrs = true;
+      return NULL_TREE;
+    }
+
+  /* The alignment in bits corresponding to the specified alignment.  */
+  unsigned bitalign = (1U << pow2align) * BITS_PER_UNIT;
+
+  /* The alignment of the current declaration and that of the last
+     pushed declaration, determined on demand below.  */
+  unsigned curalign = 0;
+  unsigned lastalign = 0;
+
+  /* True when SET_DECL_ALIGN() should be called for the decl when
+     *NO_ADD_ATTRS is false.  */
+  bool set_align = true;
+  if (is_type)
+    {
+      if ((flags & (int) ATTR_FLAG_TYPE_IN_PLACE))
+	/* OK, modify the type in place.  */;
+      /* If we have a TYPE_DECL, then copy the type, so that we
+	 don't accidentally modify a builtin type.  See pushdecl.  */
+      else if (decl && TREE_TYPE (decl) != error_mark_node
+	       && DECL_ORIGINAL_TYPE (decl) == NULL_TREE)
+	{
+	  tree tt = TREE_TYPE (decl);
+	  *type = build_variant_type_copy (*type);
+	  DECL_ORIGINAL_TYPE (decl) = tt;
+	  TYPE_NAME (*type) = decl;
+	  TREE_USED (*type) = TREE_USED (decl);
+	  TREE_TYPE (decl) = *type;
+	}
+      else
+	*type = build_variant_type_copy (*type);
+
+      if (warn_if_not_aligned_p)
+	{
+	  SET_TYPE_WARN_IF_NOT_ALIGN (*type, bitalign);
+	  warn_if_not_aligned_p = false;
+	}
+      else
+	{
+	  SET_TYPE_ALIGN (*type, bitalign);
+	  TYPE_USER_ALIGN (*type) = 1;
+	}
+    }
+  else if (! VAR_OR_FUNCTION_DECL_P (decl)
+	   && TREE_CODE (decl) != FIELD_DECL)
+    {
+      error ("alignment may not be specified for %q+D", decl);
+      *no_add_attrs = true;
+    }
+  else if (TREE_CODE (decl) == FUNCTION_DECL
+	   && (((curalign = DECL_ALIGN (decl)) > bitalign)
+	       | ((lastalign = DECL_ALIGN (last_decl)) > bitalign)))
+    {
+      /* Either a prior attribute on the same declaration or one
+	 on a prior declaration of the same function specifies
+	 stricter alignment than this attribute.  */
+      bool note = (lastalign > curalign
+		   || (lastalign == curalign
+		       && (DECL_USER_ALIGN (last_decl)
+			   > DECL_USER_ALIGN (decl))));
+      if (note)
+	curalign = lastalign;
+
+      curalign /= BITS_PER_UNIT;
+      unsigned newalign = bitalign / BITS_PER_UNIT;
+
+      auto_diagnostic_group d;
+      if ((DECL_USER_ALIGN (decl)
+	   || DECL_USER_ALIGN (last_decl)))
+	{
+	  if (warning (OPT_Wattributes,
+		       "ignoring attribute %<%E (%u)%> because it conflicts "
+		       "with attribute %<%E (%u)%>",
+		       name, newalign, name, curalign)
+	      && note)
+	    inform (DECL_SOURCE_LOCATION (last_decl),
+		    "previous declaration here");
+	  /* Only reject attempts to relax/override an alignment
+	     explicitly specified previously and accept declarations
+	     that appear to relax the implicit function alignment for
+	     the target.  Both increasing and increasing the alignment
+	     set by -falign-functions setting is permitted.  */
+	  *no_add_attrs = true;
+	}
+      else if (!warn_if_not_aligned_p)
+	{
+	  /* Do not fail for attribute warn_if_not_aligned.  Otherwise,
+	     silently avoid applying the alignment to the declaration
+	     because it's implicitly satisfied by the target.  Apply
+	     the attribute nevertheless so it can be retrieved by
+	     __builtin_has_attribute.  */
+	  set_align = false;
+	}
+    }
+  else if (DECL_USER_ALIGN (decl)
+	   && DECL_ALIGN (decl) > bitalign)
+    /* C++-11 [dcl.align/4]:
+
+	   When multiple alignment-specifiers are specified for an
+	   entity, the alignment requirement shall be set to the
+	   strictest specified alignment.
+
+      This formally comes from the c++11 specification but we are
+      doing it for the GNU attribute syntax as well.  */
+    *no_add_attrs = true;
+  else if (warn_if_not_aligned_p
+	   && TREE_CODE (decl) == FIELD_DECL
+	   && !DECL_C_BIT_FIELD (decl))
+    {
+      SET_DECL_WARN_IF_NOT_ALIGN (decl, bitalign);
+      warn_if_not_aligned_p = false;
+      set_align = false;
+    }
+
+  if (warn_if_not_aligned_p)
+    {
+      error ("%<warn_if_not_aligned%> may not be specified for %q+D",
+	     decl);
+      *no_add_attrs = true;
+    }
+  else if (!is_type && !*no_add_attrs && set_align)
+    {
+      SET_DECL_ALIGN (decl, bitalign);
+      DECL_USER_ALIGN (decl) = 1;
+    }
+
+  return NULL_TREE;
+}
+
+/* Handle a "aligned" attribute; arguments as in
+   struct attribute_spec.handler.  */
+
+tree
+handle_aligned_attribute (tree *node, tree name, tree args,
+			  int flags, bool *no_add_attrs)
+{
+  return common_handle_aligned_attribute (node, name, args, flags,
+					 no_add_attrs, false);
+}
+
+/* (end of attribute-handling).  */
+
+/* Language-dependent contents of a type.  */
+
+struct GTY(()) lang_type
+{
+  char dummy;
+};
+
+/* Language-dependent contents of a decl.  */
+
+struct GTY((variable_size)) lang_decl
+{
+  char dummy;
+};
+
+/* Language-dependent contents of an identifier.  This must include a
+   tree_identifier.  */
+
+struct GTY(()) lang_identifier
+{
+  struct tree_identifier common;
+};
+
+/* The resulting tree type.  */
+
+/* See lang_tree_node in gcc/c/c-decl.cc.  */
+union GTY((desc ("TREE_CODE (&%h.generic) == IDENTIFIER_NODE"),
+  chain_next ("(union lang_tree_node *) jit_tree_chain_next (&%h.generic)")))
+  lang_tree_node
+ {
+  union tree_node GTY ((tag ("0"),
+			desc ("tree_node_structure (&%h)")))
+    generic;
+  struct lang_identifier GTY ((tag ("1"))) identifier;
+};
+
+/* We don't use language_function.  */
+
+struct GTY(()) language_function
+{
+  int dummy;
+};
+
+/* GC-marking callback for use from jit_root_tab.
+
+   If there's an active playback context, call its marking method
+   so that it can mark any pointers it references.  */
+
+static void my_ggc_walker (void *)
+{
+  if (gcc::jit::active_playback_ctxt)
+    gcc::jit::active_playback_ctxt->gt_ggc_mx ();
+}
+
+const char *dummy;
+
+struct ggc_root_tab jit_root_tab[] =
+  {
+    {
+      &dummy, 1, 0, my_ggc_walker, NULL
+    },
+    LAST_GGC_ROOT_TAB
+  };
+
+/* Subclass of diagnostics::text_sink for libgccjit: like text
+   output, but capture the message and call add_diagnostic with it
+   on the active playback context.  */
+
+class jit_diagnostic_listener : public diagnostics::text_sink
+{
+public:
+  jit_diagnostic_listener (diagnostics::context &dc,
+			   gcc::jit::playback::context &playback_ctxt)
+  : diagnostics::text_sink (dc),
+    m_playback_ctxt (playback_ctxt)
+  {
+    dc.set_dont_abort_on_fatal_error (true);
+  }
+
+  void dump (FILE *out, int indent) const final override
+  {
+    fprintf (out, "%*sjit_diagnostic_listener\n", indent, "");
+    fprintf (out, "%*sm_playback_context: %p\n",
+	     indent + 2, "",
+	     (void *)&m_playback_ctxt);
+  }
+
+  void on_report_diagnostic (const diagnostics::diagnostic_info &info,
+			     enum diagnostics::kind orig_diag_kind) final override
+  {
+    JIT_LOG_SCOPE (gcc::jit::active_playback_ctxt->get_logger ());
+
+    /* Let the text output format do most of the work.  */
+    diagnostics::text_sink::on_report_diagnostic (info, orig_diag_kind);
+
+    const char *text = pp_formatted_text (get_printer ());
+
+    /* Delegate to the playback context (and thence to the
+       recording context).  */
+    gcc::jit::active_playback_ctxt->add_diagnostic (text, info);
+
+    pp_clear_output_area (get_printer ());
+  }
+
+private:
+  gcc::jit::playback::context &m_playback_ctxt;
+};
+
+/* JIT-specific implementation of diagnostic callbacks.  */
+
+/* Implementation of "begin_diagnostic".  */
+
+static void
+jit_begin_diagnostic (diagnostics::text_sink &,
+		      const diagnostics::diagnostic_info */*diagnostic*/)
+{
+  gcc_assert (gcc::jit::active_playback_ctxt);
+  JIT_LOG_SCOPE (gcc::jit::active_playback_ctxt->get_logger ());
+
+  /* No-op (apart from logging); the real error-handling is done by the
+     jit_diagnostic_listener.  */
+}
+
+/* Implementation of "end_diagnostic".  */
+
+static void
+jit_end_diagnostic (diagnostics::text_sink &,
+		    const diagnostics::diagnostic_info *,
+		    enum diagnostics::kind)
+{
+  gcc_assert (gcc::jit::active_playback_ctxt);
+  JIT_LOG_SCOPE (gcc::jit::active_playback_ctxt->get_logger ());
+
+  /* No-op (apart from logging); the real error-handling is done by the
+     jit_diagnostic_listener.  */
+}
+
+/* Language hooks.  */
+
+static bool
+jit_langhook_init (void)
+{
+  if (jit_lang_name)
+    lang_hooks.name = jit_lang_name;
+
+  jit_gc_root = NULL_TREE;
+  personality_decl = NULL_TREE;
+  gcc_assert (gcc::jit::active_playback_ctxt);
+  JIT_LOG_SCOPE (gcc::jit::active_playback_ctxt->get_logger ());
+
+  static bool registered_root_tab = false;
+  if (!registered_root_tab)
+    {
+      ggc_register_root_tab (jit_root_tab);
+      registered_root_tab = true;
+    }
+
+  gcc_assert (global_dc);
+  diagnostics::text_starter (global_dc) = jit_begin_diagnostic;
+  diagnostics::text_finalizer (global_dc) = jit_end_diagnostic;
+  auto sink
+    = std::make_unique<jit_diagnostic_listener>
+	(*global_dc,
+	 *gcc::jit::active_playback_ctxt);
+  global_dc->set_sink (std::move (sink));
+
+  build_common_tree_nodes (flag_signed_char);
+
+  /* I don't know why this has to be done explicitly.  */
+  void_list_node = build_tree_list (NULL_TREE, void_type_node);
+
+  target_builtins.empty ();
+  build_common_builtin_nodes ();
+
+  /* Initialize EH, if we've been told to do so.  */
+  if (flag_exceptions)
+    using_eh_for_cleanups ();
+
+  /* The default precision for floating point numbers.  This is used
+     for floating point constants with abstract type.  This may
+     eventually be controllable by a command line option.  */
+  mpfr_set_default_prec (256);
+
+  targetm.init_builtins ();
+
+  return true;
+}
+
+static void
+jit_langhook_parse_file (void)
+{
+  /* Replay the activity by the client, recorded on the context.  */
+  gcc_assert (gcc::jit::active_playback_ctxt);
+  gcc::jit::active_playback_ctxt->replay ();
+}
+
+static tree
+jit_langhook_type_for_mode (machine_mode mode, int unsignedp)
+{
+  /* Build any vector types here (see PR 46805).  */
+  if (VECTOR_MODE_P (mode))
+    {
+      tree inner;
+
+      inner = jit_langhook_type_for_mode (GET_MODE_INNER (mode), unsignedp);
+      if (inner != NULL_TREE)
+	return build_vector_type_for_mode (inner, mode);
+      return NULL_TREE;
+    }
+
+  if (mode == TYPE_MODE (float_type_node))
+    return float_type_node;
+
+  if (mode == TYPE_MODE (double_type_node))
+    return double_type_node;
+
+  if (mode == TYPE_MODE (intQI_type_node))
+    return unsignedp ? unsigned_intQI_type_node : intQI_type_node;
+  if (mode == TYPE_MODE (intHI_type_node))
+    return unsignedp ? unsigned_intHI_type_node : intHI_type_node;
+  if (mode == TYPE_MODE (intSI_type_node))
+    return unsignedp ? unsigned_intSI_type_node : intSI_type_node;
+  if (mode == TYPE_MODE (intDI_type_node))
+    return unsignedp ? unsigned_intDI_type_node : intDI_type_node;
+  if (mode == TYPE_MODE (intTI_type_node))
+    return unsignedp ? unsigned_intTI_type_node : intTI_type_node;
+
+  if (mode == TYPE_MODE (integer_type_node))
+    return unsignedp ? unsigned_type_node : integer_type_node;
+
+  if (mode == TYPE_MODE (long_integer_type_node))
+    return unsignedp ? long_unsigned_type_node : long_integer_type_node;
+
+  if (mode == TYPE_MODE (long_long_integer_type_node))
+    return unsignedp ? long_long_unsigned_type_node : long_long_integer_type_node;
+
+  if (COMPLEX_MODE_P (mode))
+    {
+      if (mode == TYPE_MODE (complex_float_type_node))
+	return complex_float_type_node;
+      if (mode == TYPE_MODE (complex_double_type_node))
+	return complex_double_type_node;
+      if (mode == TYPE_MODE (complex_long_double_type_node))
+	return complex_long_double_type_node;
+      if (mode == TYPE_MODE (complex_integer_type_node) && !unsignedp)
+	return complex_integer_type_node;
+    }
+
+  for (int i = 0; i < NUM_FLOATN_NX_TYPES; i++)
+    if (FLOATN_NX_TYPE_NODE (i) != NULL_TREE
+	&& mode == TYPE_MODE (FLOATN_NX_TYPE_NODE (i)))
+      return FLOATN_NX_TYPE_NODE (i);
+  /* gcc_unreachable */
+  return NULL;
+}
+
+recording::type* tree_type_to_jit_type (tree type)
+{
+  gcc_assert (gcc::jit::active_playback_ctxt);
+  gcc::jit::playback::context* ctxt = gcc::jit::active_playback_ctxt;
+
+  if (TREE_CODE (type) == VECTOR_TYPE)
+  {
+    tree inner_type = TREE_TYPE (type);
+    recording::type* element_type = tree_type_to_jit_type (inner_type);
+    poly_uint64 size = TYPE_VECTOR_SUBPARTS (type);
+    long constant_size = size.to_constant ();
+    if (element_type != NULL)
+      return element_type->get_vector (constant_size);
+    return NULL;
+  }
+  if (TREE_CODE (type) == REFERENCE_TYPE)
+    // For __builtin_ms_va_start.
+    // FIXME: wrong type.
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_VOID);
+  if (TREE_CODE (type) == RECORD_TYPE)
+    // For __builtin_sysv_va_copy.
+    // FIXME: wrong type.
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_VOID);
+  if (type == void_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_VOID);
+  else if (type == ptr_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_VOID_PTR);
+  else if (type == const_ptr_type_node)
+  {
+    // Void const ptr.
+    recording::type* result =
+      new recording::memento_of_get_type (&target_builtins_ctxt,
+					  GCC_JIT_TYPE_VOID_PTR);
+    return new recording::memento_of_get_const (result);
+  }
+  else if (type == unsigned_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_UNSIGNED_INT);
+  else if (type == long_unsigned_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_UNSIGNED_LONG);
+  else if (type == integer_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_INT);
+  else if (type == long_integer_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_LONG);
+  else if (type == long_long_integer_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_LONG_LONG);
+  else if (type == signed_char_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_SIGNED_CHAR);
+  else if (type == char_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_CHAR);
+  else if (type == unsigned_intQI_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_UINT8_T);
+  else if (type == short_integer_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_SHORT);
+  else if (type == short_unsigned_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_UNSIGNED_SHORT);
+  else if (type == complex_float_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_COMPLEX_FLOAT);
+  else if (type == complex_double_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_COMPLEX_DOUBLE);
+  else if (type == complex_long_double_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					    GCC_JIT_TYPE_COMPLEX_LONG_DOUBLE);
+  else if (type == float_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_FLOAT);
+  else if (type == double_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_DOUBLE);
+  else if (type == long_double_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_LONG_DOUBLE);
+  else if (type == bfloat16_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_BFLOAT16);
+  else if (type == float16_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					      GCC_JIT_TYPE_FLOAT16);
+  }
+  else if (type == float32_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					      GCC_JIT_TYPE_FLOAT32);
+  }
+  else if (type == float64_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					      GCC_JIT_TYPE_FLOAT64);
+  }
+  else if (type == float128_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					      GCC_JIT_TYPE_FLOAT128);
+  }
+  else if (type == dfloat128_type_node)
+    // FIXME: wrong type.
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_VOID);
+  else if (type == long_long_unsigned_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_UNSIGNED_LONG_LONG);
+  else if (type == boolean_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_BOOL);
+  else if (type == size_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+					       GCC_JIT_TYPE_SIZE_T);
+  else if (TREE_CODE (type) == POINTER_TYPE)
+  {
+    tree inner_type = TREE_TYPE (type);
+    recording::type* element_type = tree_type_to_jit_type (inner_type);
+    if (!element_type)
+      return nullptr;
+    return element_type->get_pointer ();
+  }
+  else if (type == unsigned_intTI_type_node)
+    return new recording::memento_of_get_type (&target_builtins_ctxt,
+      GCC_JIT_TYPE_UINT128_T);
+  else if (INTEGRAL_TYPE_P (type))
+  {
+    unsigned int size = tree_to_uhwi (TYPE_SIZE_UNIT (type));
+    return target_builtins_ctxt.get_int_type (size, TYPE_UNSIGNED (type));
+  }
+  else if (SCALAR_FLOAT_TYPE_P (type))
+  {
+    unsigned int size = tree_to_uhwi (TYPE_SIZE_UNIT (type));
+    enum gcc_jit_types type;
+    switch (size)
+    {
+      case 2:
+	type = GCC_JIT_TYPE_BFLOAT16;
+	break;
+      case 4:
+	type = GCC_JIT_TYPE_FLOAT;
+	break;
+      case 8:
+	type = GCC_JIT_TYPE_DOUBLE;
+	break;
+      default:
+	if (ctxt->get_abort_on_unsupported_target_builtin ())
+	{
+	  fprintf (stderr, "Unexpected float size: %d\n", size);
+	  abort ();
+	}
+	return NULL;
+    }
+    return new recording::memento_of_get_type (&target_builtins_ctxt, type);
+  }
+  else
+  {
+    // Attempt to find an unqualified type when the current type has qualifiers.
+    tree tp = TYPE_MAIN_VARIANT (type);
+    for ( ; tp != NULL ; tp = TYPE_NEXT_VARIANT (tp))
+    {
+      if (TYPE_QUALS (tp) == 0 && type != tp)
+      {
+	recording::type* result = tree_type_to_jit_type (tp);
+	if (result != NULL)
+	{
+	  if (TYPE_READONLY (tp))
+	    result = new recording::memento_of_get_const (result);
+	  if (TYPE_VOLATILE (tp))
+	    result = new recording::memento_of_get_volatile (result);
+	  return result;
+	}
+      }
+    }
+
+    if (ctxt->get_abort_on_unsupported_target_builtin ())
+    {
+      fprintf (stderr, "Unknown type:\n");
+      debug_tree (type);
+      abort ();
+    }
+  }
+
+  return NULL;
+}
+
+/* Record a builtin function.  We save their types to be able to check types
+   in recording and for reflection.  */
+
+static tree
+jit_langhook_builtin_function (tree decl)
+{
+  if (TREE_CODE (decl) == FUNCTION_DECL)
+  {
+    const char* name = IDENTIFIER_POINTER (DECL_NAME (decl));
+    target_builtins.put (name, decl);
+
+    std::string string_name (name);
+    if (target_function_types.count (string_name) == 0)
+    {
+      tree function_type = TREE_TYPE (decl);
+      tree arg = TYPE_ARG_TYPES (function_type);
+      bool is_variadic = false;
+
+      auto_vec <recording::type *> param_types;
+
+      while (arg != void_list_node)
+      {
+	if (arg == NULL)
+	{
+	  is_variadic = true;
+	  break;
+	}
+	if (arg != void_list_node)
+	{
+	  recording::type* arg_type = tree_type_to_jit_type (TREE_VALUE (arg));
+	  if (arg_type == NULL)
+	    return decl;
+	  param_types.safe_push (arg_type);
+	}
+	arg = TREE_CHAIN (arg);
+      }
+
+      tree result_type = TREE_TYPE (function_type);
+      recording::type* return_type = tree_type_to_jit_type (result_type);
+
+      if (return_type == NULL)
+	return decl;
+
+      recording::function_type* func_type =
+	new recording::function_type (&target_builtins_ctxt, return_type,
+				      param_types.length (),
+				      param_types.address (), is_variadic,
+				      false);
+
+      target_function_types[string_name] = func_type;
+    }
+  }
+  return decl;
+}
+
+static bool
+jit_langhook_global_bindings_p (void)
+{
+  return true;
+}
+
+static tree
+jit_langhook_pushdecl (tree decl ATTRIBUTE_UNUSED)
+{
+  return NULL_TREE;
+}
+
+static tree
+jit_langhook_getdecls (void)
+{
+  return NULL;
+}
+
+static tree
+jit_langhook_eh_personality (void)
+{
+  if (personality_decl == NULL_TREE)
+  {
+    if (jit_personality_func_name != NULL) {
+      personality_decl = build_personality_function_with_name (jit_personality_func_name);
+      jit_preserve_from_gc(personality_decl);
+    }
+    else {
+      return lhd_gcc_personality();
+    }
+  }
+  return personality_decl;
+}
+
+static tree
+jit_langhook_type_promotes_to (tree type)
+{
+  /* The "default argument promotions" */
+
+  /* float is promoted to double. */
+  if (TYPE_MAIN_VARIANT (type) == float_type_node)
+    return double_type_node;
+
+  /* integers smaller than int are promoted to int. */
+  if (INTEGRAL_TYPE_P (type)
+      && TYPE_PRECISION (type) < TYPE_PRECISION (integer_type_node))
+    return integer_type_node;
+
+  return type;
+}
+
+static unsigned int
+jit_langhook_option_lang_mask (void)
+{
+  return CL_LibGCCJIT;
+}
+
+#undef LANG_HOOKS_OPTION_LANG_MASK
+#define LANG_HOOKS_OPTION_LANG_MASK jit_langhook_option_lang_mask
+
+static bool
+jit_langhook_handle_option (
+  size_t code ATTRIBUTE_UNUSED,
+  const char *arg ATTRIBUTE_UNUSED,
+  HOST_WIDE_INT value ATTRIBUTE_UNUSED,
+  int kind ATTRIBUTE_UNUSED,
+  location_t loc ATTRIBUTE_UNUSED,
+  const struct cl_option_handlers *handlers ATTRIBUTE_UNUSED)
+{
+  return true;
+}
+
+#undef LANG_HOOKS_HANDLE_OPTION
+#define LANG_HOOKS_HANDLE_OPTION jit_langhook_handle_option
+
+#undef LANG_HOOKS_EH_PERSONALITY
+#define LANG_HOOKS_EH_PERSONALITY jit_langhook_eh_personality
+
+#undef LANG_HOOKS_TYPE_PROMOTES_TO
+#define LANG_HOOKS_TYPE_PROMOTES_TO jit_langhook_type_promotes_to
+
+#undef LANG_HOOKS_NAME
+#define LANG_HOOKS_NAME		"libgccjit"
+
+#undef LANG_HOOKS_INIT
+#define LANG_HOOKS_INIT		jit_langhook_init
+
+#undef LANG_HOOKS_PARSE_FILE
+#define LANG_HOOKS_PARSE_FILE		jit_langhook_parse_file
+
+#undef LANG_HOOKS_TYPE_FOR_MODE
+#define LANG_HOOKS_TYPE_FOR_MODE	jit_langhook_type_for_mode
+
+#undef LANG_HOOKS_BUILTIN_FUNCTION
+#define LANG_HOOKS_BUILTIN_FUNCTION	jit_langhook_builtin_function
+
+#undef LANG_HOOKS_GLOBAL_BINDINGS_P
+#define LANG_HOOKS_GLOBAL_BINDINGS_P	jit_langhook_global_bindings_p
+
+#undef LANG_HOOKS_PUSHDECL
+#define LANG_HOOKS_PUSHDECL		jit_langhook_pushdecl
+
+#undef LANG_HOOKS_GETDECLS
+#define LANG_HOOKS_GETDECLS		jit_langhook_getdecls
+
+/* Attribute hooks.  */
+#undef LANG_HOOKS_ATTRIBUTE_TABLE
+#define LANG_HOOKS_ATTRIBUTE_TABLE jit_attribute_table
+
+#undef  LANG_HOOKS_DEEP_UNSHARING
+#define LANG_HOOKS_DEEP_UNSHARING	true
+
+struct lang_hooks lang_hooks = LANG_HOOKS_INITIALIZER;
+
+#include "gt-jit-dummy-frontend.h"
+#include "gtype-jit.h"

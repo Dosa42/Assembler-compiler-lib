@@ -1,0 +1,309 @@
+use crate::comparison::ArtifactComparison;
+use crate::github::client::{Client, GraphQLClient, ResponseComment};
+use crate::github::comparison_summary::calculate_metric_comparison;
+use crate::load::SiteCtxt;
+use crate::request_handlers::parse_unrolled_build_message;
+use anyhow::bail;
+use database::QueuedCommit;
+use database::metric::Metric;
+
+pub struct TriageBuild {
+    pub rollup_pr_number: u32,
+    pub triage_comment: ResponseComment,
+}
+
+pub const TRIAGE_MARKER: &str = "<!-- rust-timer: triage -->";
+pub const TRIAGE_REQUEST_PRIORITY: i32 = -10;
+
+pub fn triage_body_start_marker(pr: u32) -> String {
+    format!("<!-- rust-timer:triage-body-start-pr-{pr} -->\n")
+}
+pub fn triage_body_end_marker(pr: u32) -> String {
+    format!("<!-- rust-timer:triage-body-end-pr-{pr} -->\n")
+}
+
+/// Returns `Some` if this commit is part of a triage run.
+pub async fn is_triage_run(
+    commit: &QueuedCommit,
+    client: &mut Client,
+    graph_qlclient: &mut GraphQLClient,
+) -> anyhow::Result<Option<TriageBuild>> {
+    // Find the rollup PR
+    let commit_title = client.get_commit(&commit.sha).await?;
+    let Ok(unrolled_build) = parse_unrolled_build_message(&commit_title.commit.message) else {
+        // The commit title parsed successfully during the `@rust-timer triage` command, so if it does not parse here it's not a triage run
+        return Ok(None);
+    };
+
+    // Find the triage run on the rollup PR
+    let rollup_comments = graph_qlclient
+        .get_comments(unrolled_build.rollup_pr_number)
+        .await?;
+    let Some(triage_comment) = rollup_comments.into_iter().rev().find(|c| {
+        c.viewer_did_author && c.body.contains(TRIAGE_MARKER) && c.body.contains(&commit.sha)
+    }) else {
+        // This was a try job on the unrolled build that did not originate from a triage command
+        return Ok(None);
+    };
+
+    Ok(Some(TriageBuild {
+        rollup_pr_number: unrolled_build.rollup_pr_number,
+        triage_comment,
+    }))
+}
+
+pub fn update_triage_body(
+    body: &mut String,
+    pr: u32,
+    triage_summary: String,
+) -> anyhow::Result<()> {
+    let Some(body_start) = body.find(&triage_body_start_marker(pr)) else {
+        bail!("Failed to triage body start")
+    };
+    let body_start = body_start + triage_body_start_marker(pr).len();
+    let Some(body_end) = body.find(&triage_body_end_marker(pr)) else {
+        bail!("Failed to triage body end")
+    };
+
+    body.replace_range(body_start..body_end, &triage_summary);
+    Ok(())
+}
+
+pub async fn changed_benchmarks_in_rollup(
+    ctxt: &SiteCtxt,
+    rollup: u32,
+) -> anyhow::Result<Vec<String>> {
+    let master_commits = ctxt.get_master_commits();
+    let Some(rollup) = master_commits
+        .commits
+        .iter()
+        .find(|commit| commit.pr.is_some_and(|pr| pr == rollup))
+        .cloned()
+    else {
+        bail!(
+            "The `@rust-timer triage` command can only be executed in merged rollups. If this is a merged rollup, it might be too old."
+        )
+    };
+    drop(master_commits);
+
+    let comparison = calculate_metric_comparison(
+        ctxt,
+        &rollup.parent_sha,
+        &rollup.sha,
+        Metric::InstructionsUser,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    Ok(changed_benchmarks(&comparison))
+}
+
+pub fn changed_benchmarks(comparison: &ArtifactComparison) -> Vec<String> {
+    let compile_benchmarks = comparison.compile_comparisons.iter().flat_map(|c| {
+        c.comparison
+            .is_relevant()
+            .then_some(c.test_case.benchmark.to_string())
+    });
+    // Include newly failed benchmarks so we can triage which PRs broke them
+    let newly_failed_benchmarks = comparison.newly_failed_benchmarks.keys();
+
+    let mut changed_benchmarks = compile_benchmarks
+        .chain(newly_failed_benchmarks.cloned())
+        .collect::<Vec<_>>();
+    changed_benchmarks.sort();
+    changed_benchmarks.dedup();
+    changed_benchmarks
+}
+
+pub fn find_and_parse_unrolled_build_comment<'a>(
+    mut comments: impl Iterator<Item = &'a str>,
+) -> anyhow::Result<Vec<&'a str>> {
+    const MACHINE_READABLE_SHAS_START: &str = "<!-- machine-readable-shas: ";
+    const MACHINE_READABLE_SHAS_END: &str = " -->";
+    let Some(unrolled_builds) = comments.find_map(|c| {
+        let start = c.find(MACHINE_READABLE_SHAS_START)? + MACHINE_READABLE_SHAS_START.len();
+        let len = c[start..].find(MACHINE_READABLE_SHAS_END)?;
+        Some(&c[start..start + len])
+    }) else {
+        bail!("Could not find unrolled builds comment by bors. Did unrolled builds finish yet?")
+    };
+
+    match serde_json::from_str(unrolled_builds) {
+        Ok(r) => Ok(r),
+        Err(e) => bail!("Failed to parse machine readable shas: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use insta::assert_compact_debug_snapshot;
+
+    const BEFORE_BODY: &str = "### #157428 364c9dea926885d60daef4bf1a15fa03efa35a84 allocator: refactor for stabilisation
+<!-- rust-timer:triage-body-start-pr-157428 -->
+Queued 364c9dea926885d60daef4bf1a15fa03efa35a84 with parent 93c9086fdd5b80d286480a19ac047746ecc5fa1f, future [comparison URL](https://perf.rust-lang.org/compare.html?start=93c9086fdd5b80d286480a19ac047746ecc5fa1f&end=364c9dea926885d60daef4bf1a15fa03efa35a84).
+There are currently 0 preceding artifacts in the [queue](https://perf.rust-lang.org/status.html).
+It will probably take at least ~1.0 hours until the benchmark run finishes.
+<!-- rust-timer:triage-body-end-pr-157428 -->
+
+### #160077 a96bde1411c3b0fe68417c04e85624f33b645516 Don't compute FnAbi for LLVM intrinsics
+<!-- rust-timer:triage-body-start-pr-160077 -->
+Queued a96bde1411c3b0fe68417c04e85624f33b645516 with parent 93c9086fdd5b80d286480a19ac047746ecc5fa1f, future [comparison URL](https://perf.rust-lang.org/compare.html?start=93c9086fdd5b80d286480a19ac047746ecc5fa1f&end=a96bde1411c3b0fe68417c04e85624f33b645516).
+There is currently 1 preceding artifact in the [queue](https://perf.rust-lang.org/status.html).
+It will probably take at least ~2.0 hours until the benchmark run finishes.
+<!-- rust-timer:triage-body-end-pr-160077 -->
+
+### #160288 77cb04ee49e4f29833262112d5abf705c96faa98 rustdoc: use anonymous constant for primitives/keywords/attribute docs
+<!-- rust-timer:triage-body-start-pr-160288 -->
+Queued 77cb04ee49e4f29833262112d5abf705c96faa98 with parent 93c9086fdd5b80d286480a19ac047746ecc5fa1f, future [comparison URL](https://perf.rust-lang.org/compare.html?start=93c9086fdd5b80d286480a19ac047746ecc5fa1f&end=77cb04ee49e4f29833262112d5abf705c96faa98).
+There are currently 2 preceding artifacts in the [queue](https://perf.rust-lang.org/status.html).
+It will probably take at least ~3.0 hours until the benchmark run finishes.
+<!-- rust-timer:triage-body-end-pr-160288 -->
+
+<!-- rust-timer: triage -->";
+    const UNROLLED_PERF_BUILDS: &str = r###":pushpin: Perf builds for each rolled up PR:
+
+| PR# | Message | Perf Build Sha |
+|----|----|:-----:|
+|#162409|Fix gap in const stability checks around intrinsics|`537ff44bf1c0eed7b368e0cba6f3211a04aa8b05`<br>([link](https://github.com/rust-lang/rust/commit/537ff44bf1c0eed7b368e0cba6f3211a04aa8b05))|
+|#162763|Remove `Box::into_unique`|`55e90fc35ea7347299c28d418f4d5b90ee5240b4`<br>([link](https://github.com/rust-lang/rust/commit/55e90fc35ea7347299c28d418f4d5b90ee5240b4))|
+|#162766|stop unleaking `&mut`s in std and the compiler|`913889fbb28463a5ba4227406c2425d5eede5449`<br>([link](https://github.com/rust-lang/rust/commit/913889fbb28463a5ba4227406c2425d5eede5449))|
+
+*parent commit*: [a8a1e6fd9d](https://github.com/rust-lang/rust/commit/a8a1e6fd9df2e094d6f09c0d57991508680acc1c)
+
+In the case of a perf regression, run the following command for each PR you suspect might be the cause: `@rust-timer build $SHA`
+<!-- machine-readable-shas: ["537ff44bf1c0eed7b368e0cba6f3211a04aa8b05","55e90fc35ea7347299c28d418f4d5b90ee5240b4","913889fbb28463a5ba4227406c2425d5eede5449"] -->"###;
+
+    #[test]
+    fn test_update_first() {
+        let mut body = BEFORE_BODY.to_string();
+        update_triage_body(
+            &mut body,
+            157428,
+            "NEW BODY1\nNEW BODY2\nNEW BODY3\n".to_string(),
+        )
+        .unwrap();
+
+        const EXPECTED_RESULT: &str = "### #157428 364c9dea926885d60daef4bf1a15fa03efa35a84 allocator: refactor for stabilisation
+<!-- rust-timer:triage-body-start-pr-157428 -->
+NEW BODY1
+NEW BODY2
+NEW BODY3
+<!-- rust-timer:triage-body-end-pr-157428 -->
+
+### #160077 a96bde1411c3b0fe68417c04e85624f33b645516 Don't compute FnAbi for LLVM intrinsics
+<!-- rust-timer:triage-body-start-pr-160077 -->
+Queued a96bde1411c3b0fe68417c04e85624f33b645516 with parent 93c9086fdd5b80d286480a19ac047746ecc5fa1f, future [comparison URL](https://perf.rust-lang.org/compare.html?start=93c9086fdd5b80d286480a19ac047746ecc5fa1f&end=a96bde1411c3b0fe68417c04e85624f33b645516).
+There is currently 1 preceding artifact in the [queue](https://perf.rust-lang.org/status.html).
+It will probably take at least ~2.0 hours until the benchmark run finishes.
+<!-- rust-timer:triage-body-end-pr-160077 -->
+
+### #160288 77cb04ee49e4f29833262112d5abf705c96faa98 rustdoc: use anonymous constant for primitives/keywords/attribute docs
+<!-- rust-timer:triage-body-start-pr-160288 -->
+Queued 77cb04ee49e4f29833262112d5abf705c96faa98 with parent 93c9086fdd5b80d286480a19ac047746ecc5fa1f, future [comparison URL](https://perf.rust-lang.org/compare.html?start=93c9086fdd5b80d286480a19ac047746ecc5fa1f&end=77cb04ee49e4f29833262112d5abf705c96faa98).
+There are currently 2 preceding artifacts in the [queue](https://perf.rust-lang.org/status.html).
+It will probably take at least ~3.0 hours until the benchmark run finishes.
+<!-- rust-timer:triage-body-end-pr-160288 -->
+
+<!-- rust-timer: triage -->";
+        assert_eq!(body, EXPECTED_RESULT);
+    }
+
+    #[test]
+    fn test_update_second() {
+        let mut body = BEFORE_BODY.to_string();
+        update_triage_body(
+            &mut body,
+            160077,
+            "NEW BODY1\nNEW BODY2\nNEW BODY3\n".to_string(),
+        )
+        .unwrap();
+
+        const EXPECTED_RESULT: &str = "### #157428 364c9dea926885d60daef4bf1a15fa03efa35a84 allocator: refactor for stabilisation
+<!-- rust-timer:triage-body-start-pr-157428 -->
+Queued 364c9dea926885d60daef4bf1a15fa03efa35a84 with parent 93c9086fdd5b80d286480a19ac047746ecc5fa1f, future [comparison URL](https://perf.rust-lang.org/compare.html?start=93c9086fdd5b80d286480a19ac047746ecc5fa1f&end=364c9dea926885d60daef4bf1a15fa03efa35a84).
+There are currently 0 preceding artifacts in the [queue](https://perf.rust-lang.org/status.html).
+It will probably take at least ~1.0 hours until the benchmark run finishes.
+<!-- rust-timer:triage-body-end-pr-157428 -->
+
+### #160077 a96bde1411c3b0fe68417c04e85624f33b645516 Don't compute FnAbi for LLVM intrinsics
+<!-- rust-timer:triage-body-start-pr-160077 -->
+NEW BODY1
+NEW BODY2
+NEW BODY3
+<!-- rust-timer:triage-body-end-pr-160077 -->
+
+### #160288 77cb04ee49e4f29833262112d5abf705c96faa98 rustdoc: use anonymous constant for primitives/keywords/attribute docs
+<!-- rust-timer:triage-body-start-pr-160288 -->
+Queued 77cb04ee49e4f29833262112d5abf705c96faa98 with parent 93c9086fdd5b80d286480a19ac047746ecc5fa1f, future [comparison URL](https://perf.rust-lang.org/compare.html?start=93c9086fdd5b80d286480a19ac047746ecc5fa1f&end=77cb04ee49e4f29833262112d5abf705c96faa98).
+There are currently 2 preceding artifacts in the [queue](https://perf.rust-lang.org/status.html).
+It will probably take at least ~3.0 hours until the benchmark run finishes.
+<!-- rust-timer:triage-body-end-pr-160288 -->
+
+<!-- rust-timer: triage -->";
+        assert_eq!(body, EXPECTED_RESULT);
+    }
+
+    #[test]
+    fn test_update_last() {
+        let mut body = BEFORE_BODY.to_string();
+        update_triage_body(
+            &mut body,
+            160288,
+            "NEW BODY1\nNEW BODY2\nNEW BODY3\n".to_string(),
+        )
+        .unwrap();
+
+        const EXPECTED_RESULT: &str = "### #157428 364c9dea926885d60daef4bf1a15fa03efa35a84 allocator: refactor for stabilisation
+<!-- rust-timer:triage-body-start-pr-157428 -->
+Queued 364c9dea926885d60daef4bf1a15fa03efa35a84 with parent 93c9086fdd5b80d286480a19ac047746ecc5fa1f, future [comparison URL](https://perf.rust-lang.org/compare.html?start=93c9086fdd5b80d286480a19ac047746ecc5fa1f&end=364c9dea926885d60daef4bf1a15fa03efa35a84).
+There are currently 0 preceding artifacts in the [queue](https://perf.rust-lang.org/status.html).
+It will probably take at least ~1.0 hours until the benchmark run finishes.
+<!-- rust-timer:triage-body-end-pr-157428 -->
+
+### #160077 a96bde1411c3b0fe68417c04e85624f33b645516 Don't compute FnAbi for LLVM intrinsics
+<!-- rust-timer:triage-body-start-pr-160077 -->
+Queued a96bde1411c3b0fe68417c04e85624f33b645516 with parent 93c9086fdd5b80d286480a19ac047746ecc5fa1f, future [comparison URL](https://perf.rust-lang.org/compare.html?start=93c9086fdd5b80d286480a19ac047746ecc5fa1f&end=a96bde1411c3b0fe68417c04e85624f33b645516).
+There is currently 1 preceding artifact in the [queue](https://perf.rust-lang.org/status.html).
+It will probably take at least ~2.0 hours until the benchmark run finishes.
+<!-- rust-timer:triage-body-end-pr-160077 -->
+
+### #160288 77cb04ee49e4f29833262112d5abf705c96faa98 rustdoc: use anonymous constant for primitives/keywords/attribute docs
+<!-- rust-timer:triage-body-start-pr-160288 -->
+NEW BODY1
+NEW BODY2
+NEW BODY3
+<!-- rust-timer:triage-body-end-pr-160288 -->
+
+<!-- rust-timer: triage -->";
+        assert_eq!(body, EXPECTED_RESULT);
+    }
+
+    #[test]
+    fn test_update_not_in_there() {
+        let mut body = BEFORE_BODY.to_string();
+        assert!(
+            update_triage_body(
+                &mut body,
+                1234,
+                "NEW BODY1\nNEW BODY2\nNEW BODY3\n".to_string()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_parse_shas() {
+        assert_compact_debug_snapshot!(
+            find_and_parse_unrolled_build_comment([
+                // Comments that should be skipped...
+                "Not the right one...",
+                "",
+                BEFORE_BODY,
+                // The right one
+                UNROLLED_PERF_BUILDS,
+            ].into_iter()).unwrap(),
+            @r#"["537ff44bf1c0eed7b368e0cba6f3211a04aa8b05", "55e90fc35ea7347299c28d418f4d5b90ee5240b4", "913889fbb28463a5ba4227406c2425d5eede5449"]"#
+        );
+    }
+}

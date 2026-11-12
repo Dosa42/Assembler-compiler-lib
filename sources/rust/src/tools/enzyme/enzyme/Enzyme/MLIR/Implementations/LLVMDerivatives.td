@@ -1,0 +1,51 @@
+include "Common.td"
+
+def : ReturnOp<"LLVM", "ReturnOp">;
+def : MemoryIdentityOp<"LLVM", "StoreOp", [1], [0]>;
+def : InactiveOp<"LLVM", "SIToFPOp">;
+def : InactiveOp<"LLVM", "UIToFPOp">;
+def : InactiveOp<"LLVM", "FPToSIOp">;
+def : InactiveOp<"LLVM", "FPToUIOp">;
+def : InactiveOp<"LLVM", "AssumeOp">;
+def : InactiveOp<"LLVM", "StackSaveOp">;
+def : InactiveOp<"LLVM", "StackRestoreOp">;
+def : InactiveOp<"LLVM", "NoAliasScopeDeclOp">;
+def : InactiveOp<"LLVM", "LifetimeStartOp">;
+def : InactiveOp<"LLVM", "LifetimeEndOp">;
+def : InactiveOp<"LLVM", "DbgValueOp">;
+def : InactiveOp<"LLVM", "DbgDeclareOp">;
+def : InactiveOp<"LLVM", "DbgLabelOp">;
+def : InactiveOp<"LLVM", "Prefetch">;
+def : InactiveOp<"LLVM", "MemsetOp">;
+
+def : InactiveOp<"LLVM", "UndefOp">;
+def : InactiveOp<"LLVM", "ConstantOp">;
+def : InactiveOp<"LLVM", "UnreachableOp">;
+
+
+def : ReadOnlyIdentityOp<"LLVM", "LoadOp", [0]>;
+def : MemoryIdentityOp<"LLVM", "ExtractValueOp", [0], [0]>;
+def : MemoryIdentityOp<"LLVM", "InsertValueOp", [0, 1], [0, 1]>;
+def : ReadOnlyIdentityOp<"LLVM", "AddrSpaceCastOp", [0]>;
+def : ReadOnlyIdentityOp<"LLVM", "BitcastOp", [0]>;
+def : ReadOnlyIdentityOp<"LLVM", "GEPOp", [0]>;
+def : ReadOnlyIdentityOp<"LLVM", "PtrToIntOp", [0]>;
+def : ReadOnlyIdentityOp<"LLVM", "IntToPtrOp", [0]>;
+
+def : AllocationOp<"LLVM", "AllocaOp">;
+
+def : MLIRDerivative<"LLVM", "ExpOp", (Op $x),
+                    [
+                      (LlvmCheckedMulF (DiffeRet), (LlvmExpF $x))
+                    ]
+                  >;
+
+def : MLIRDerivative<"LLVM", "SelectOp", (Op $pred, $x, $y),
+                    [
+                      (AssertingInactiveArg),
+                      (Llvm_Select $pred, (DiffeRet), (ConstantFP<"0","arith","ConstantOp"> $x)),
+                      (Llvm_Select $pred, (ConstantFP<"0","arith","ConstantOp"> $x), (DiffeRet)),
+                    ]
+                  >;
+
+def : CallOp<"LLVM", "CallOp">;

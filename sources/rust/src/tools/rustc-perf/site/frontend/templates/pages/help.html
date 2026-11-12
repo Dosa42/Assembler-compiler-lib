@@ -1,0 +1,68 @@
+{% extends "layout.html" %}
+{% block head %}
+<style>
+  .help-content {
+    font-family: Helvetica, Arial, sans-serif;
+    line-height: 140%;
+    font-size: 16px;
+    max-width: 50em;
+  }
+
+  .help-content code {
+    background: #eee;
+    border-radius: 5px;
+    padding: 2px;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="help-content">
+  <h3><b><code>@rust-timer</code> commands</b></h3>
+  <p><code>@rust-timer</code> supports several commands, the most common (and simple) being
+    <code>@rust-timer queue</code>. This command is usually invoked as <code>@bors try @rust-timer
+      queue</code>, which starts a bors <a
+      href="https://rustc-dev-guide.rust-lang.org/tests/ci.html#try-builds">"try build"</a> (not a
+    merge). <code>@rust-timer</code> will wait for the try build to finish, and if it succeeds will
+    then queue a perf run.
+  </p>
+  <p><code>@rust-timer queue</code> has a few extra options that can be useful:</p>
+  <ul>
+    <li><code>backends=&lt;BACKENDS&gt;</code> configures which codegen backends should be
+      benchmarked.
+      By default, only the LLVM backend is benchmarked. If you select a non-default codegen backend,
+      rustc-perf will also gather data for this backend for the parent/baseline commit, so that we
+      have something to compare to.
+    </li>
+    <li><code>profiles=&lt;PROFILES&gt;</code> configures which profiles should be benchmarked.
+      If you select a non-default profile, rustc-perf will also gather data for this profile for the
+      parent/baseline commit, so that we have something to compare to.
+    </li>
+    <li><code>targets=&lt;TARGETS&gt;</code> configures which targets should be benchmarked.
+      If no targets are provided <code>x86_64-unknown-linux-gnu</code> is the default.
+      Presently, valid targets are <code>x86_64-unknown-linux-gnu</code> and <code>aarch64-unknown-linux-gnu</code>.
+    </li>
+    <li><code>benchmarks=&lt;BENCHMARKS&gt;</code> configures which benchmarks should be benchmarked.
+      If no benchmarks are provided, all benchmarks will be executed.
+    </li>
+    <li><code>priority=&lt;INT&gt;</code> configures the priority of this benchmark run.
+      The default priority of benchmark runs is 0. Priority can be set to a positive (higher priority) or negative (lower priority) number.
+      Triage runs have a priority of -10. Master builds have a priority of 10.
+    </li>
+  </ul>
+  <p><code>@rust-timer build $commit</code> will queue a perf run for the given commit
+    <code>$commit</code>.
+    It is usually invoked with the commit from a successful "try" run. (The
+    <code>queue</code> command can be seen as a shortcut that automatically selects the
+    "try" run's commit for the <code>build</code> command)
+    This command also supports the same options as <code>@rust-timer queue</code>.
+  </p>
+  <p><code>@rust-timer triage $commits</code> is meant to be executed on a rollup,
+    to help identify the culprit of performance regressions/improvements of that rollup.
+    It takes a space-separated list of `$commits` SHAs, and queues a perf run for each commit.
+    The results are reported on the corresponding PRs, and in the future will also be reported in
+    the rollup itself.
+    This command does not (yet) support options.
+  </p>
+</div>
+{% endblock %}

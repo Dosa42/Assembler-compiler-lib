@@ -1,0 +1,26 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    "github>rust-lang/renovate",
+    "docker:disable",
+  ],
+  ignorePaths: [
+    "collector/compile-benchmarks/**",
+    "collector/runtime-benchmarks/**",
+  ],
+  "lockFileMaintenance": {
+    "extends": ["schedule:monthly"]
+  },
+  "packageRules": [
+    // Disable individual PRs for breaking changes
+    {
+      "matchCategories": ["rust", "js"],
+      "matchJsonata": ["isBreaking = true"],
+      "enabled": false
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "extends": ["schedule:monthly"]
+    }
+  ],
+}

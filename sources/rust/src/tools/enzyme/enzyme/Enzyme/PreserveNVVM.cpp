@@ -1,0 +1,1314 @@
+//===- PreserveNVVM.cpp - Mark NVVM attributes for preservation.  -------===//
+//
+//                             Enzyme Project
+//
+// Part of the Enzyme Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+// If using this code in an academic setting, please cite the following:
+// @incollection{enzymeNeurips,
+// title = {Instead of Rewriting Foreign Code for Machine Learning,
+//          Automatically Synthesize Fast Gradients},
+// author = {Moses, William S. and Churavy, Valentin},
+// booktitle = {Advances in Neural Information Processing Systems 33},
+// year = {2020},
+// note = {To appear in},
+// }
+//
+//===----------------------------------------------------------------------===//
+//
+// This file contains createPreserveNVVM, a transformation pass that marks
+// calls to __nv_* functions, marking them as noinline as implementing the llvm
+// intrinsic.
+//
+//===----------------------------------------------------------------------===//
+#include <llvm/Config/llvm-config.h>
+
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
+
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallSet.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include "llvm/Support/TimeProfiler.h"
+
+#include "llvm/Pass.h"
+
+#include "llvm/Transforms/Utils.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
+
+#include <map>
+
+#include "PreserveNVVM.h"
+#include "Utils.h"
+
+using namespace llvm;
+#ifdef DEBUG_TYPE
+#undef DEBUG_TYPE
+#endif
+#define DEBUG_TYPE "preserve-nvvm"
+
+#if LLVM_VERSION_MAJOR >= 14
+#define addAttribute addAttributeAtIndex
+#endif
+
+#ifndef ENZYME_ENABLE_NVVM_ATTRIBUTION
+#define ENZYME_ENABLE_NVVM_ATTRIBUTION 1
+#endif
+
+/// Mark F itself as inactive, and additionally mark everything in its body, so
+/// that differentiating through the body is a no-op rather than merely calls to
+/// F being inactive.
+void markFunctionInactive(Function &F) {
+  F.addAttribute(AttributeList::FunctionIndex,
+                 Attribute::get(F.getContext(), "enzyme_inactive"));
+  auto MD = MDNode::get(F.getContext(), {});
+  for (auto &BB : F) {
+    for (auto &I : BB) {
+      if (auto CB = dyn_cast<CallBase>(&I)) {
+        CB->addFnAttr(llvm::Attribute::get(F.getContext(), "enzyme_inactive"));
+      } else {
+        I.setMetadata("enzyme_inactive", MD);
+      }
+    }
+  }
+}
+
+/// If F is a trivial forwarding wrapper -- one basic block holding a single
+/// call whose operands are F's own arguments in order, followed by a return of
+/// that call's result -- copy the callee's function attributes onto F, except
+/// those that only steer inlining or code placement.
+///
+/// preserveLinkage marks libdevice wrappers such as __nv_sqrt (whose body is
+/// just `call @llvm.nvvm.sqrt.rn.d; ret`) noinline so Enzyme can recognize
+/// them by name. Inlining is how the wrapper would normally pick up the
+/// intrinsic's attributes, and FunctionAttrs never infers `speculatable`, so
+/// without this the wrapper stays an opaque call that LICM cannot hoist and
+/// SimplifyCFG cannot if-convert. In a loop, that forces Enzyme to cache
+/// per-iteration values that would otherwise be loop invariant.
+///
+/// Returns whether F changed.
+bool copyForwardedCalleeAttrs(Function &F) {
+  if (F.isDeclaration() || F.isVarArg() || F.size() != 1)
+    return false;
+  BasicBlock &BB = F.getEntryBlock();
+  if (BB.size() != 2)
+    return false;
+  auto *CI = dyn_cast<CallInst>(&BB.front());
+  auto *RI = dyn_cast<ReturnInst>(BB.getTerminator());
+  if (!CI || !RI)
+    return false;
+  Function *Callee = CI->getCalledFunction();
+  if (!Callee || Callee == &F || CI->arg_size() != F.arg_size())
+    return false;
+  for (unsigned i = 0, e = F.arg_size(); i < e; ++i)
+    if (CI->getArgOperand(i) != F.getArg(i))
+      return false;
+  if (F.getReturnType()->isVoidTy()) {
+    if (RI->getReturnValue())
+      return false;
+  } else if (RI->getReturnValue() != CI) {
+    return false;
+  }
+
+  bool changed = false;
+#if LLVM_VERSION_MAJOR >= 16
+  // F only runs the callee, so its effects are at most the callee's.
+  auto ME = F.getMemoryEffects() & Callee->getMemoryEffects();
+  if (ME != F.getMemoryEffects()) {
+    F.setMemoryEffects(ME);
+    changed = true;
+  }
+#endif
+  // Only semantic guarantees that hold for a call forwarded verbatim. Anything
+  // describing how the callee's own body was compiled (inlining hints, code
+  // placement, sanitizers, stack protection, coroutine state, ...) stays put.
+  static const Attribute::AttrKind Forwardable[] = {
+    Attribute::Speculatable,
+    Attribute::NoUnwind,
+    Attribute::WillReturn,
+    Attribute::MustProgress,
+    Attribute::NoSync,
+    Attribute::NoFree,
+    Attribute::NoRecurse,
+    Attribute::NoCallback,
+    Attribute::NoReturn,
+    Attribute::Convergent,
+#if LLVM_VERSION_MAJOR >= 23
+    Attribute::NoCreateUndefOrPoison,
+#endif
+#if LLVM_VERSION_MAJOR < 16
+    Attribute::ReadNone,
+    Attribute::ReadOnly,
+    Attribute::WriteOnly,
+    Attribute::ArgMemOnly,
+    Attribute::InaccessibleMemOnly,
+    Attribute::InaccessibleMemOrArgMemOnly,
+#endif
+  };
+  for (auto K : Forwardable) {
+    if (!Callee->hasFnAttribute(K) || F.hasFnAttribute(K))
+      continue;
+    F.addFnAttr(K);
+    changed = true;
+  }
+  // llvm.nvvm.sqrt.* (rn/rz/rm/rp, ftz, approx) are declared IntrNoMem but not
+  // IntrSpeculatable upstream, unlike llvm.nvvm.fabs or llvm.sqrt itself, even
+  // though InstCombine later rewrites the rn forms to llvm.sqrt. They have no
+  // side effects or UB (a negative input just yields NaN), so __nv_sqrt and
+  // __nv_sqrtf may be hoisted and if-converted like any other math call.
+  if (startsWith(Callee->getName(), "llvm.nvvm.sqrt.") &&
+      !F.hasFnAttribute(Attribute::Speculatable)) {
+    F.addFnAttr(Attribute::Speculatable);
+    changed = true;
+  }
+  return changed;
+}
+
+//! Returns whether changed.
+bool preserveLinkage(bool Begin, Function &F, bool Inlining = true) {
+  if (Begin && !F.hasFnAttribute("prev_fixup")) {
+    F.addFnAttr("prev_fixup");
+    if (F.hasFnAttribute(Attribute::AlwaysInline))
+      F.addFnAttr("prev_always_inline");
+    if (F.hasFnAttribute(Attribute::NoInline))
+      F.addFnAttr("prev_no_inline");
+    if (Inlining) {
+      F.removeFnAttr(Attribute::AlwaysInline);
+      F.addFnAttr(Attribute::NoInline);
+      copyForwardedCalleeAttrs(F);
+    }
+    F.addFnAttr("prev_linkage", std::to_string(F.getLinkage()));
+    F.setLinkage(Function::LinkageTypes::ExternalLinkage);
+    return true;
+  }
+  return false;
+}
+
+static void handleFunctionLike(bool Begin, Value *Target,
+                               StringRef FunctionName) {
+  while (auto *CE = dyn_cast<ConstantExpr>(Target))
+    Target = CE->getOperand(0);
+
+  if (FunctionName.empty()) {
+    errs() << "Use of enzyme_function_like requires a non-empty function "
+              "name\n";
+    llvm_unreachable("enzyme_function_like");
+  }
+
+  auto *F = dyn_cast<Function>(Target);
+  if (!F) {
+    errs() << "First argument of enzyme_function_like must be a constant "
+              "function\n"
+           << *Target << "\n";
+    llvm_unreachable("enzyme_function_like");
+  }
+
+  // Warn on conflicting registrations while preserving the existing
+  // last-registration-wins behavior.
+  Attribute Existing = F->getFnAttribute("enzyme_math");
+  if (Existing.isValid() && Existing.getValueAsString() != FunctionName) {
+    errs() << "warning: conflicting enzyme_function_like registrations for "
+              "function '"
+           << F->getName() << "': replacing '" << Existing.getValueAsString()
+           << "' with '" << FunctionName << "'\n";
+  }
+
+  F->addAttribute(AttributeList::FunctionIndex,
+                  Attribute::get(F->getContext(), "enzyme_math", FunctionName));
+  preserveLinkage(Begin, *F);
+}
+
+// Return true if the module has a triple indicating an nvptx target, false
+// otherwise.
+bool isTargetNVPTX(llvm::Module &M) {
+#if LLVM_VERSION_MAJOR > 20
+  return M.getTargetTriple().getArch() == Triple::ArchType::nvptx ||
+         M.getTargetTriple().getArch() == Triple::ArchType::nvptx64;
+#else
+  return M.getTargetTriple().find("nvptx") != std::string::npos;
+#endif
+}
+
+template <const char *handlername, DerivativeMode Mode, int numargs>
+static void
+handleCustomDerivative(llvm::Module &M, llvm::GlobalVariable &g,
+                       SmallVectorImpl<GlobalVariable *> &globalsToErase,
+                       bool PreserveCustomRuleLinkage) {
+  if (g.hasInitializer()) {
+    if (auto CA = dyn_cast<ConstantAggregate>(g.getInitializer())) {
+      if (CA->getNumOperands() < numargs) {
+        llvm::errs() << M << "\n";
+        llvm::errs() << "Use of " << handlername
+                     << " must be a "
+                        "constant of size at least "
+                     << numargs << " " << g << "\n";
+        llvm_unreachable(handlername);
+      } else {
+        Function *Fs[numargs];
+        for (size_t i = 0; i < numargs; i++) {
+          Value *V = CA->getOperand(i);
+          while (auto CE = dyn_cast<ConstantExpr>(V)) {
+            V = CE->getOperand(0);
+          }
+          if (auto CA = dyn_cast<ConstantAggregate>(V))
+            V = CA->getOperand(0);
+          while (auto CE = dyn_cast<ConstantExpr>(V)) {
+            V = CE->getOperand(0);
+          }
+          if (auto F = dyn_cast<Function>(V)) {
+            Fs[i] = F;
+          } else {
+            llvm::errs() << M << "\n";
+            llvm::errs() << "Param of " << handlername
+                         << " must be a "
+                            "function"
+                         << g << "\n"
+                         << *V << "\n";
+            llvm_unreachable(handlername);
+          }
+        }
+
+        SmallSet<size_t, 1> byref;
+
+        if constexpr (Mode == DerivativeMode::ReverseModeGradient) {
+          assert(numargs >= 3);
+          for (size_t i = numargs; i < CA->getNumOperands(); i++) {
+            Value *V = CA->getOperand(i);
+            while (auto CE = dyn_cast<ConstantExpr>(V)) {
+              V = CE->getOperand(0);
+            }
+            if (auto CA = dyn_cast<ConstantAggregate>(V))
+              V = CA->getOperand(0);
+            while (auto CE = dyn_cast<ConstantExpr>(V)) {
+              V = CE->getOperand(0);
+            }
+            if (auto GV = dyn_cast<GlobalVariable>(V)) {
+              if (GV->isConstant())
+                if (auto C = GV->getInitializer())
+                  if (auto CA = dyn_cast<ConstantDataArray>(C))
+                    if (CA->getType()->getElementType()->isIntegerTy(8) &&
+                        CA->isCString()) {
+
+                      auto str = CA->getAsCString();
+                      bool legal = startsWith(str, "byref_");
+                      size_t argnum = 0;
+                      if (legal) {
+                        for (size_t i = str.size() - 1, len = strlen("byref_");
+                             i >= len; i--) {
+                          char c = str[i];
+                          if (c < '0' || c > '9') {
+                            legal = false;
+                            break;
+                          }
+                          argnum *= 10;
+                          argnum += c - '0';
+                        }
+                      }
+                      if (legal) {
+                        byref.insert(argnum);
+                        continue;
+                      }
+                    }
+            }
+            llvm::errs() << M << "\n";
+            llvm::errs() << "Use of " << handlername
+                         << " possible post args include 'byref_ret'"
+                         << "\n";
+            llvm_unreachable(handlername);
+          }
+
+          if (byref.size())
+            for (size_t fn = 1; fn <= 2; fn++) {
+              Function *F = Fs[fn];
+              bool need = false;
+              size_t nonSRetSize = 0;
+              for (size_t i = 0; i < F->arg_size(); i++)
+                if (!F->hasParamAttribute(i, Attribute::StructRet))
+                  nonSRetSize++;
+              for (auto r : byref)
+                if (r < nonSRetSize)
+                  need = true;
+              if (!need)
+                continue;
+
+              SmallVector<Type *, 3> args;
+              Type *sretTy = nullptr;
+              size_t realidx = 0;
+              size_t i = 0;
+              for (auto &arg : F->args()) {
+                if (!F->hasParamAttribute(i, Attribute::StructRet)) {
+                  if (!byref.count(realidx))
+                    args.push_back(arg.getType());
+                  else {
+                    // TODO in opaque pointers
+                    Type *subTy = nullptr;
+#if LLVM_VERSION_MAJOR < 17
+                    subTy = arg.getType()->getPointerElementType();
+#endif
+                    assert(subTy);
+                    args.push_back(subTy);
+                  }
+                  realidx++;
+                } else {
+                  llvm::Type *T = nullptr;
+#if LLVM_VERSION_MAJOR > 12
+                  T = F->getParamAttribute(i, Attribute::StructRet)
+                          .getValueAsType();
+#else
+                  T = arg.getType()->getPointerElementType();
+#endif
+                  sretTy = T;
+                }
+                i++;
+              }
+              Type *RT = F->getReturnType();
+              if (sretTy) {
+                assert(RT->isVoidTy());
+                RT = sretTy;
+              }
+              FunctionType *FTy =
+                  FunctionType::get(RT, args, F->getFunctionType()->isVarArg());
+              Function *NewF =
+                  Function::Create(FTy, Function::LinkageTypes::InternalLinkage,
+                                   "fixbyval_" + F->getName(), F->getParent());
+
+              AllocaInst *AI = nullptr;
+              BasicBlock *BB =
+                  BasicBlock::Create(NewF->getContext(), "entry", NewF);
+              IRBuilder<> bb(BB);
+              if (sretTy)
+                AI = bb.CreateAlloca(sretTy);
+              SmallVector<Value *, 3> argVs;
+              auto arg = NewF->arg_begin();
+              realidx = 0;
+              for (size_t i = 0; i < F->arg_size(); i++) {
+                if (!F->hasParamAttribute(i, Attribute::StructRet)) {
+                  arg->setName("arg" + Twine(realidx));
+                  if (!byref.count(realidx))
+                    argVs.push_back(arg);
+                  else {
+                    auto A = bb.CreateAlloca(arg->getType());
+                    bb.CreateStore(arg, A);
+                    argVs.push_back(A);
+                  }
+                  realidx++;
+                  ++arg;
+                } else {
+                  argVs.push_back(AI);
+                }
+              }
+              auto cal = bb.CreateCall(F, argVs);
+              cal->setCallingConv(F->getCallingConv());
+
+              if (sretTy) {
+                Value *res = bb.CreateLoad(sretTy, AI);
+                bb.CreateRet(res);
+              } else if (!RT->isVoidTy()) {
+                bb.CreateRet(cal);
+              } else
+                bb.CreateRetVoid();
+
+              Fs[fn] = NewF;
+            }
+
+          if (PreserveCustomRuleLinkage)
+            preserveLinkage(true, *Fs[1], false);
+          Fs[0]->setMetadata(
+              "enzyme_augment",
+              llvm::MDTuple::get(Fs[0]->getContext(),
+                                 {llvm::ValueAsMetadata::get(Fs[1])}));
+          if (PreserveCustomRuleLinkage)
+            preserveLinkage(true, *Fs[2], false);
+          Fs[0]->setMetadata(
+              "enzyme_gradient",
+              llvm::MDTuple::get(Fs[0]->getContext(),
+                                 {llvm::ValueAsMetadata::get(Fs[2])}));
+        } else if constexpr (Mode == DerivativeMode::ForwardMode) {
+          assert(numargs == 2);
+          if (PreserveCustomRuleLinkage)
+            preserveLinkage(true, *Fs[1], false);
+          Fs[0]->setMetadata(
+              "enzyme_derivative",
+              llvm::MDTuple::get(Fs[0]->getContext(),
+                                 {llvm::ValueAsMetadata::get(Fs[1])}));
+        } else if constexpr (Mode == DerivativeMode::ForwardModeSplit) {
+          assert(numargs == 3);
+          if (PreserveCustomRuleLinkage)
+            preserveLinkage(true, *Fs[1], false);
+          Fs[0]->setMetadata(
+              "enzyme_augment",
+              llvm::MDTuple::get(Fs[0]->getContext(),
+                                 {llvm::ValueAsMetadata::get(Fs[1])}));
+          if (PreserveCustomRuleLinkage)
+            preserveLinkage(true, *Fs[2], false);
+          Fs[0]->setMetadata(
+              "enzyme_splitderivative",
+              llvm::MDTuple::get(Fs[0]->getContext(),
+                                 {llvm::ValueAsMetadata::get(Fs[2])}));
+        } else
+          assert("Unknown mode");
+      }
+    } else if (isTargetNVPTX(M)) {
+      llvm::errs() << M << "\n";
+      llvm::errs() << "Use of " << handlername
+                   << " must be a "
+                      "constant aggregate "
+                   << g << "\n";
+      llvm_unreachable(handlername);
+    }
+  } else {
+    llvm::errs() << M << "\n";
+    llvm::errs() << "Use of " << handlername
+                 << " must be a "
+                    "constant array of size "
+                 << numargs << " " << g << "\n";
+    llvm_unreachable(handlername);
+  }
+  globalsToErase.push_back(&g);
+}
+
+bool preserveNVVM(bool Begin, Module &M,
+                  bool PreserveCustomRuleLinkage = true) {
+  bool changed = false;
+  constexpr static const char gradient_handler_name[] =
+      "__enzyme_register_gradient";
+  constexpr static const char derivative_handler_name[] =
+      "__enzyme_register_derivative";
+  constexpr static const char splitderivative_handler_name[] =
+      "__enzyme_register_splitderivative";
+
+  // Flang cannot construct the constant function/string aggregate used by
+  // __enzyme_function_like. The Fortran binding instead passes a function and
+  // a BIND(C) global whose name is enzyme_math_<function>.
+  if (Begin) {
+    SmallVector<CallInst *, 4> functionLikeCalls;
+    for (Function &Caller : M) {
+      for (BasicBlock &BB : Caller) {
+        for (Instruction &I : BB) {
+          auto *Call = dyn_cast<CallInst>(&I);
+          if (!Call)
+            continue;
+
+          auto *Hook =
+              dyn_cast<Function>(Call->getCalledOperand()->stripPointerCasts());
+          if (!Hook || !startsWith(Hook->getName(), "f__enzyme_function_like"))
+            continue;
+
+          if (Call->arg_size() != 2) {
+            errs() << "Fortran enzyme_function_like requires exactly a "
+                      "function and a function name\n"
+                   << *Call << "\n";
+            llvm_unreachable("invalid Fortran enzyme_function_like call");
+          }
+
+          auto *NameGlobal = dyn_cast<GlobalVariable>(
+              Call->getArgOperand(1)->stripPointerCasts());
+          if (!NameGlobal) {
+            errs() << "Second argument of Fortran enzyme_function_like must "
+                      "be an enzyme_math_* function name\n"
+                   << *Call->getArgOperand(1) << "\n";
+            llvm_unreachable(
+                "invalid Fortran enzyme_function_like function name");
+          }
+
+          StringRef FunctionName = NameGlobal->getName();
+          if (!FunctionName.consume_front("enzyme_math_")) {
+            errs() << "Fortran enzyme_function_like function name must use "
+                      "the enzyme_math_* BIND(C) naming convention\n"
+                   << *NameGlobal << "\n";
+            llvm_unreachable(
+                "invalid Fortran enzyme_function_like function name");
+          }
+
+          handleFunctionLike(Begin, Call->getArgOperand(0), FunctionName);
+          functionLikeCalls.push_back(Call);
+          changed = true;
+        }
+      }
+    }
+    for (CallInst *Call : functionLikeCalls)
+      Call->eraseFromParent();
+  }
+
+  if (Begin)
+    if (GlobalVariable *GA = M.getGlobalVariable("llvm.global.annotations")) {
+      if (GA->hasInitializer()) {
+        auto AOp = GA->getInitializer();
+        // all metadata are stored in an array of struct of metadata
+        if (ConstantArray *CA = dyn_cast<ConstantArray>(AOp)) {
+          // so iterate over the operands
+          SmallVector<Constant *, 1> replacements;
+          for (Value *CAOp : CA->operands()) {
+            // get the struct, which holds a pointer to the annotated function
+            // as first field, and the annotation as second field
+            ConstantStruct *CS = dyn_cast<ConstantStruct>(CAOp);
+            if (!CS)
+              continue;
+
+            if (CS->getNumOperands() < 2)
+              continue;
+
+            // the second field is a pointer to a global constant Array that
+            // holds the string
+            GlobalVariable *GAnn =
+                dyn_cast<GlobalVariable>(CS->getOperand(1)->getOperand(0));
+
+            ConstantDataArray *A = nullptr;
+
+            if (GAnn)
+              A = dyn_cast<ConstantDataArray>(GAnn->getOperand(0));
+            else
+              A = dyn_cast<ConstantDataArray>(CS->getOperand(1)->getOperand(0));
+
+            if (!A)
+              continue;
+
+            // we have the annotation! Check it's an epona annotation
+            // and process
+            StringRef AS = A->getAsCString();
+
+            Constant *Val = cast<Constant>(CS->getOperand(0));
+            while (auto CE = dyn_cast<ConstantExpr>(Val))
+              Val = CE->getOperand(0);
+
+            Function *Func = dyn_cast<Function>(Val);
+            GlobalVariable *Glob = dyn_cast<GlobalVariable>(Val);
+
+            if (AS == "enzyme_inactive" && Func) {
+              Func->addAttribute(
+                  AttributeList::FunctionIndex,
+                  Attribute::get(Func->getContext(), "enzyme_inactive"));
+              changed = true;
+              preserveLinkage(Begin, *Func);
+              replacements.push_back(Constant::getNullValue(CAOp->getType()));
+              continue;
+            }
+
+            // Counterparts of the __enzyme_inactivefn and
+            // __enzyme_inactivenoblockfn registration globals below, emitted by
+            // the clang plugin for __attribute__((enzyme_inactive)) and
+            // __attribute__((enzyme_inactive_noblock)). Unlike the bare
+            // enzyme_inactive annotation above these also mark the body of the
+            // function.
+            if ((AS == "enzyme_inactivefn" ||
+                 AS == "enzyme_inactivenoblockfn") &&
+                Func) {
+              markFunctionInactive(*Func);
+              changed = true;
+              preserveLinkage(Begin, *Func);
+              replacements.push_back(Constant::getNullValue(CAOp->getType()));
+              continue;
+            }
+
+            if (AS == "enzyme_elementwise_read" && Func) {
+              Func->addAttribute(AttributeList::FunctionIndex,
+                                 Attribute::get(Func->getContext(),
+                                                "enzyme_elementwise_read"));
+              changed = true;
+              replacements.push_back(Constant::getNullValue(CAOp->getType()));
+              continue;
+            }
+
+            if (AS == "enzyme_shouldrecompute" && Func) {
+              Func->addAttribute(
+                  AttributeList::FunctionIndex,
+                  Attribute::get(Func->getContext(), "enzyme_shouldrecompute"));
+              changed = true;
+              replacements.push_back(Constant::getNullValue(CAOp->getType()));
+              continue;
+            }
+
+            if (AS == "enzyme_inactive" && Glob) {
+              Glob->setMetadata("enzyme_inactive",
+                                MDNode::get(Glob->getContext(), {}));
+              changed = true;
+              replacements.push_back(Constant::getNullValue(CAOp->getType()));
+              continue;
+            }
+
+            if (AS == "enzyme_nofree" && Func) {
+              Func->addAttribute(
+                  AttributeList::FunctionIndex,
+                  Attribute::get(Func->getContext(), Attribute::NoFree));
+              changed = true;
+              preserveLinkage(Begin, *Func);
+              replacements.push_back(Constant::getNullValue(CAOp->getType()));
+              continue;
+            }
+
+            if (startsWith(AS, "enzyme_function_like") && Func) {
+              auto val = AS.substr(1 + AS.find('='));
+              handleFunctionLike(Begin, Func, val);
+              changed = true;
+              replacements.push_back(Constant::getNullValue(CAOp->getType()));
+              continue;
+            }
+
+            if (AS == "enzyme_sparse_accumulate" && Func) {
+              Func->addAttribute(AttributeList::FunctionIndex,
+                                 Attribute::get(Func->getContext(),
+                                                "enzyme_sparse_accumulate"));
+              changed = true;
+              preserveLinkage(Begin, *Func);
+              replacements.push_back(Constant::getNullValue(CAOp->getType()));
+              continue;
+            }
+
+            if (AS == "enzyme_ta_norecur" && (Glob || Func)) {
+              if (Glob) {
+                Glob->setMetadata("enzyme_ta_norecur",
+                                  MDNode::get(Glob->getContext(), {}));
+              } else if (Func) {
+                Func->addAttribute(
+                    AttributeList::FunctionIndex,
+                    Attribute::get(Func->getContext(), "enzyme_ta_norecur"));
+              }
+              changed = true;
+              replacements.push_back(Constant::getNullValue(CAOp->getType()));
+              continue;
+            }
+
+            replacements.push_back(cast<Constant>(CAOp));
+          }
+          GA->setInitializer(ConstantArray::get(CA->getType(), replacements));
+        }
+      }
+    }
+
+  for (GlobalVariable &g : M.globals()) {
+    bool customRule = g.getName().contains(gradient_handler_name) ||
+                      g.getName().contains(derivative_handler_name) ||
+                      g.getName().contains(splitderivative_handler_name);
+    if (customRule && !PreserveCustomRuleLinkage)
+      continue;
+    if (customRule || g.getName().contains("__enzyme_nofree") ||
+        g.getName().contains("__enzyme_inactivefn") ||
+        g.getName().contains("__enzyme_sparse_accumulate") ||
+        g.getName().contains("__enzyme_function_like") ||
+        g.getName().contains("__enzyme_allocation_like")) {
+      if (g.hasInitializer()) {
+        Value *V = g.getInitializer();
+        while (1) {
+          if (auto CE = dyn_cast<ConstantExpr>(V)) {
+            V = CE->getOperand(0);
+            continue;
+          }
+          if (auto CA = dyn_cast<ConstantAggregate>(V)) {
+            V = CA->getOperand(0);
+            continue;
+          }
+          break;
+        }
+        if (auto F = dyn_cast<Function>(V))
+          changed |= preserveLinkage(Begin, *F);
+      }
+    }
+  }
+  SmallVector<GlobalVariable *, 1> toErase;
+  for (GlobalVariable &g : M.globals()) {
+    if (g.getName().contains(gradient_handler_name)) {
+      handleCustomDerivative<gradient_handler_name,
+                             DerivativeMode::ReverseModeGradient, 3>(
+          M, g, toErase, PreserveCustomRuleLinkage);
+      changed = true;
+    } else if (g.getName().contains(derivative_handler_name)) {
+      handleCustomDerivative<derivative_handler_name,
+                             DerivativeMode::ForwardMode, 2>(
+          M, g, toErase, PreserveCustomRuleLinkage);
+      changed = true;
+    } else if (g.getName().contains(splitderivative_handler_name)) {
+      handleCustomDerivative<splitderivative_handler_name,
+                             DerivativeMode::ForwardModeSplit, 3>(
+          M, g, toErase, PreserveCustomRuleLinkage);
+      changed = true;
+    }
+    if (g.getName().contains("__enzyme_inactive_global")) {
+      if (g.hasInitializer()) {
+        Value *V = g.getInitializer();
+        while (1) {
+          if (auto CE = dyn_cast<ConstantExpr>(V)) {
+            V = CE->getOperand(0);
+            continue;
+          }
+          if (auto CA = dyn_cast<ConstantAggregate>(V)) {
+            V = CA->getOperand(0);
+            continue;
+          }
+          break;
+        }
+        if (auto GV = cast<GlobalVariable>(V)) {
+          GV->setMetadata("enzyme_inactive", MDNode::get(g.getContext(), {}));
+          toErase.push_back(&g);
+          changed = true;
+        } else {
+          llvm::errs() << "Param of __enzyme_inactive_global must be a "
+                          "global variable"
+                       << g << "\n"
+                       << *V << "\n";
+          llvm_unreachable("__enzyme_inactive_global");
+        }
+      }
+    }
+    if (g.getName().contains("__enzyme_inactivefn") ||
+        g.getName().contains("__enzyme_inactivenoblockfn")) {
+      if (g.hasInitializer()) {
+        Value *V = g.getInitializer();
+        while (1) {
+          if (auto CE = dyn_cast<ConstantExpr>(V)) {
+            V = CE->getOperand(0);
+            continue;
+          }
+          if (auto CA = dyn_cast<ConstantAggregate>(V)) {
+            V = CA->getOperand(0);
+            continue;
+          }
+          break;
+        }
+        if (auto F = cast<Function>(V)) {
+          markFunctionInactive(*F);
+          toErase.push_back(&g);
+          changed = true;
+        } else {
+          llvm::errs() << "Param of __enzyme_inactivefn must be a "
+                          "constant function"
+                       << g << "\n"
+                       << *V << "\n";
+          llvm_unreachable("__enzyme_inactivefn");
+        }
+      }
+    }
+    if (g.getName().contains("__enzyme_sparse_accumulate")) {
+      if (g.hasInitializer()) {
+        Value *V = g.getInitializer();
+        while (1) {
+          if (auto CE = dyn_cast<ConstantExpr>(V)) {
+            V = CE->getOperand(0);
+            continue;
+          }
+          if (auto CA = dyn_cast<ConstantAggregate>(V)) {
+            V = CA->getOperand(0);
+            continue;
+          }
+          break;
+        }
+        if (auto F = cast<Function>(V)) {
+          F->addAttribute(
+              AttributeList::FunctionIndex,
+              Attribute::get(g.getContext(), "enzyme_sparse_accumulate"));
+          toErase.push_back(&g);
+          changed = true;
+        } else {
+          llvm::errs() << "Param of __enzyme_sparse_accumulate must be a "
+                          "constant function"
+                       << g << "\n"
+                       << *V << "\n";
+          llvm_unreachable("__enzyme_sparse_accumulate");
+        }
+      }
+    }
+    if (g.getName().contains("__enzyme_nofree")) {
+      if (g.hasInitializer()) {
+        Value *V = g.getInitializer();
+        while (1) {
+          if (auto CE = dyn_cast<ConstantExpr>(V)) {
+            V = CE->getOperand(0);
+            continue;
+          }
+          if (auto CA = dyn_cast<ConstantAggregate>(V)) {
+            V = CA->getOperand(0);
+            continue;
+          }
+          break;
+        }
+        if (auto F = cast<Function>(V)) {
+          F->addAttribute(AttributeList::FunctionIndex,
+                          Attribute::get(g.getContext(), Attribute::NoFree));
+          toErase.push_back(&g);
+          changed = true;
+        } else {
+          llvm::errs() << "Param of __enzyme_nofree must be a "
+                          "constant function"
+                       << g << "\n"
+                       << *V << "\n";
+          llvm_unreachable("__enzyme_nofree");
+        }
+      }
+    }
+    if (g.getName().contains("__enzyme_function_like")) {
+      if (g.hasInitializer()) {
+        auto CA = dyn_cast<ConstantAggregate>(g.getInitializer());
+        if (!CA) {
+          constexpr StringLiteral Marker = "__enzyme_function_like__";
+          auto MarkerPos = g.getName().rfind(Marker);
+          Value *Target = g.getInitializer()->stripPointerCasts();
+
+          // Ignore globals that are not Fortran function-like registrations.
+          if (MarkerPos == StringRef::npos || !isa<Function>(Target))
+            continue;
+
+          handleFunctionLike(Begin, Target,
+                             g.getName().substr(MarkerPos + Marker.size()));
+          toErase.push_back(&g);
+          changed = true;
+          continue;
+        }
+        if (CA->getNumOperands() < 2) {
+          llvm::errs() << "Use of "
+                       << "enzyme_function_like"
+                       << " must be a "
+                          "constant of size at least "
+                       << 2 << " " << g << "\n";
+          llvm_unreachable("enzyme_function_like");
+        }
+        Value *V = CA->getOperand(0);
+        Value *name = CA->getOperand(1);
+        while (auto CE = dyn_cast<ConstantExpr>(name)) {
+          name = CE->getOperand(0);
+        }
+        StringRef nameVal;
+        if (auto GV = dyn_cast<GlobalVariable>(name))
+          if (GV->isConstant())
+            if (auto C = GV->getInitializer())
+              if (auto CA = dyn_cast<ConstantDataArray>(C))
+                if (CA->getType()->getElementType()->isIntegerTy(8) &&
+                    CA->isCString())
+                  nameVal = CA->getAsCString();
+
+        handleFunctionLike(Begin, V, nameVal);
+        toErase.push_back(&g);
+        changed = true;
+      }
+    }
+    if (g.getName().contains("__enzyme_allocation_like")) {
+      if (g.hasInitializer()) {
+        auto CA = dyn_cast<ConstantAggregate>(g.getInitializer());
+        if (!CA || CA->getNumOperands() != 4) {
+          llvm::errs() << "Use of "
+                       << "enzyme_allocation_like"
+                       << " must be a "
+                          "constant of size at least "
+                       << 4 << " " << g << "\n";
+          llvm_unreachable("enzyme_allocation_like");
+        }
+        Value *V = CA->getOperand(0);
+        Value *name = CA->getOperand(1);
+        while (auto CE = dyn_cast<ConstantExpr>(V)) {
+          V = CE->getOperand(0);
+        }
+        while (auto CE = dyn_cast<ConstantExpr>(name)) {
+          name = CE->getOperand(0);
+        }
+        Value *deallocind = CA->getOperand(2);
+        while (auto CE = dyn_cast<ConstantExpr>(deallocind)) {
+          deallocind = CE->getOperand(0);
+        }
+        Value *deallocfn = CA->getOperand(3);
+        while (auto CE = dyn_cast<ConstantExpr>(deallocfn)) {
+          deallocfn = CE->getOperand(0);
+        }
+        size_t index = 0;
+        if (isa<ConstantPointerNull>(name)) {
+          // An integer 0 may have been implicitly converted to a null pointer
+          index = 0;
+        } else if (auto CI = dyn_cast<ConstantInt>(name)) {
+          index = CI->getZExtValue();
+        } else {
+          llvm::errs() << *name << "\n";
+          llvm::errs() << "Use of "
+                       << "enzyme_allocation_like"
+                       << "requires an integer index"
+                       << "\n";
+          llvm_unreachable("enzyme_allocation_like");
+        }
+
+        StringRef deallocIndStr;
+        bool foundInd = false;
+        if (auto GV = dyn_cast<GlobalVariable>(deallocind))
+          if (GV->isConstant())
+            if (auto C = GV->getInitializer())
+              if (auto CA = dyn_cast<ConstantDataArray>(C))
+                if (CA->getType()->getElementType()->isIntegerTy(8) &&
+                    CA->isCString()) {
+                  deallocIndStr = CA->getAsCString();
+                  foundInd = true;
+                }
+
+        if (!foundInd) {
+          llvm::errs() << *deallocind << "\n";
+          llvm::errs() << "Use of "
+                       << "enzyme_allocation_like"
+                       << "requires a deallocation index string"
+                       << "\n";
+          llvm_unreachable("enzyme_allocation_like");
+        }
+        if (auto F = dyn_cast<Function>(V)) {
+          F->addAttribute(AttributeList::FunctionIndex,
+                          Attribute::get(g.getContext(), "enzyme_allocator",
+                                         std::to_string(index)));
+        } else {
+          llvm::errs() << "Param of __enzyme_allocation_like must be a "
+                          "function"
+                       << g << "\n"
+                       << *V << "\n";
+          llvm_unreachable("__enzyme_allocation_like");
+        }
+        cast<Function>(V)->addAttribute(AttributeList::FunctionIndex,
+                                        Attribute::get(g.getContext(),
+                                                       "enzyme_deallocator",
+                                                       deallocIndStr));
+
+        if (auto F = dyn_cast<Function>(deallocfn)) {
+          cast<Function>(V)->setMetadata(
+              "enzyme_deallocator_fn",
+              llvm::MDTuple::get(F->getContext(),
+                                 {llvm::ValueAsMetadata::get(F)}));
+          changed |= preserveLinkage(Begin, *F);
+        } else {
+          llvm::errs() << "Free fn of __enzyme_allocation_like must be a "
+                          "function"
+                       << g << "\n"
+                       << *deallocfn << "\n";
+          llvm_unreachable("__enzyme_allocation_like");
+        }
+        toErase.push_back(&g);
+        changed = true;
+      }
+    }
+  }
+
+  for (auto G : toErase) {
+    for (auto name : {"llvm.used", "llvm.compiler.used"}) {
+      if (auto V = M.getGlobalVariable(name)) {
+        auto C = cast<ConstantArray>(V->getInitializer());
+        SmallVector<Constant *, 1> toKeep;
+        bool found = false;
+        for (unsigned i = 0; i < C->getNumOperands(); i++) {
+          Value *Op = C->getOperand(i)->stripPointerCasts();
+          if (Op == G)
+            found = true;
+          else
+            toKeep.push_back(C->getOperand(i));
+        }
+        if (found) {
+          if (toKeep.size()) {
+            auto CA = ConstantArray::get(
+                ArrayType::get(C->getType()->getElementType(), toKeep.size()),
+                toKeep);
+            GlobalVariable *NGV = new GlobalVariable(
+                CA->getType(), V->isConstant(), V->getLinkage(), CA, "",
+                V->getThreadLocalMode());
+#if LLVM_VERSION_MAJOR > 16
+            V->getParent()->insertGlobalVariable(V->getIterator(), NGV);
+#else
+            V->getParent()->getGlobalList().insert(V->getIterator(), NGV);
+#endif
+            NGV->takeName(V);
+
+            // Nuke the old list, replacing any uses with the new one.
+            if (!V->use_empty()) {
+              Constant *VV = NGV;
+              if (VV->getType() != V->getType())
+                VV = ConstantExpr::getBitCast(VV, V->getType());
+              V->replaceAllUsesWith(VV);
+            }
+          }
+          V->eraseFromParent();
+        }
+      }
+    }
+    changed = true;
+    G->replaceAllUsesWith(ConstantPointerNull::get(G->getType()));
+    G->eraseFromParent();
+  }
+
+  StringMap<std::pair<std::string, std::string>> Implements;
+  for (std::string T : {"", "f"}) {
+    // CUDA
+    // sincos, sinpi, cospi, sincospi, cyl_bessel_i1
+    for (std::string name :
+         {"sin",        "cos",     "tan",       "log2",   "exp",    "exp2",
+          "exp10",      "cosh",    "sinh",      "tanh",   "atan2",  "atan",
+          "asin",       "acos",    "log",       "log10",  "log1p",  "acosh",
+          "asinh",      "atanh",   "expm1",     "hypot",  "rhypot", "norm3d",
+          "rnorm3d",    "norm4d",  "rnorm4d",   "norm",   "rnorm",  "cbrt",
+          "rcbrt",      "j0",      "j1",        "y0",     "y1",     "yn",
+          "jn",         "erf",     "erfinv",    "erfc",   "erfcx",  "erfcinv",
+          "normcdfinv", "normcdf", "lgamma",    "ldexp",  "scalbn", "frexp",
+          "modf",       "fmod",    "remainder", "remquo", "powi",   "tgamma",
+          "round",      "fdim",    "ilogb",     "logb",   "isinf",  "pow",
+          "sqrt",       "finite",  "fabs",      "fmax"}) {
+      std::string nvname = "__nv_" + name;
+      std::string llname = "llvm." + name + ".";
+      std::string mathname = name;
+
+      if (T == "f") {
+        mathname += "f";
+        nvname += "f";
+        llname += "f32";
+      } else {
+        llname += "f64";
+      }
+
+      Implements[nvname] = std::make_pair(mathname, llname);
+    }
+    // ROCM
+    // sincos, sinpi, cospi, sincospi, cyl_bessel_i1
+    for (std::string name : {"acos",         "acosh",        "asin",
+                             "asinh",        "atan2",        "atan",
+                             "atanh",        "cbrt",         "ceil",
+                             "copysign",     "cos",          "native_cos",
+                             "cosh",         "cospi",        "i0",
+                             "i1",           "erfc",         "erfcinv",
+                             "erfcx",        "erf",          "erfinv",
+                             "exp10",        "native_exp10", "exp2",
+                             "exp",          "native_exp",   "expm1",
+                             "fabs",         "fdim",         "floor",
+                             "fma",          "fmax",         "fmin",
+                             "fmod",         "frexp",        "hypot",
+                             "ilogb",        "isfinite",     "isinf",
+                             "isnan",        "j0",           "j1",
+                             "ldexp",        "lgamma",       "log10",
+                             "native_log10", "log1p",        "log2",
+                             "log2",         "logb",         "log",
+                             "native_log",   "modf",         "nearbyint",
+                             "nextafter",    "len3",         "len4",
+                             "ncdf",         "ncdfinv",      "pow",
+                             "pown",         "rcbrt",        "remainder",
+                             "remquo",       "rhypot",       "rint",
+                             "rlen3",        "rlen4",        "round",
+                             "rsqrt",        "scalb",        "scalbn",
+                             "signbit",      "sincos",       "sincospi",
+                             "sin",          "native_sin",   "sinh",
+                             "sinpi",        "sqrt",         "native_sqrt",
+                             "tan",          "tanh",         "tgamma",
+                             "trunc",        "y0",           "y1"}) {
+      std::string nvname = "__ocml_" + name + "_";
+      std::string llname = "llvm." + name + ".";
+      std::string mathname = name;
+
+      if (T == "f") {
+        mathname += "f";
+        nvname += "f32";
+        llname += "f32";
+      } else {
+        nvname += "f64";
+        llname += "f64";
+      }
+
+      Implements[nvname] = std::make_pair(mathname, llname);
+    }
+    // Metal AIR (air.<name>.f32 / air.<name>.f64 -- Metal has no long
+    // double, so there is no third T variant here).
+    // tanh/cosh/sinh (and their fast_ forms) are deliberately excluded here:
+    // CallPattern matching (see InstructionDerivatives.td) runs against this
+    // same enzyme_math-substituted name, so tagging air.tanh.f32 here would
+    // make it dispatch through the plain "tanhf" CallPattern -- whose
+    // companion is hardcoded to the libm name "coshf", not "air.cosh.f32" --
+    // rather than through the dedicated air.tanh.f32 CallPattern that exists
+    // specifically to keep the companion AIR-native.
+    for (std::string name : {"sin", "cos", "tan", "asin", "acos", "atan",
+                             "atan2", "exp", "exp2", "log", "log2", "log10",
+                             "log1p", "expm1", "sqrt", "cbrt", "pow", "fma"}) {
+      std::string airname = "air." + name + (T == "f" ? ".f32" : ".f64");
+      std::string llname = "llvm." + name + "." + (T == "f" ? "f32" : "f64");
+      std::string mathname = name + T;
+
+      Implements[airname] = std::make_pair(mathname, llname);
+    }
+    // Metal AIR fast-math variants (air.fast_<name>.f32 -- Metal only
+    // exposes fast math for float). These map to the same mathname/llname
+    // as the precise version above: enzyme_math dispatch and the
+    // ReplaceFunctionImplementation companion-rewrite don't distinguish
+    // fast vs precise, they just need a valid libm/llvm target name.
+    // fast_tanh/fast_cosh/fast_sinh are excluded for the same reason as
+    // their non-fast forms above.
+    if (T == "f") {
+      for (std::string name :
+           {"log", "exp", "sin", "cos", "tan", "sqrt", "asin", "acos", "atan",
+            "atan2", "acosh", "asinh"}) {
+        std::string airname = "air.fast_" + name + ".f32";
+        std::string llname = "llvm." + name + ".f32";
+        std::string mathname = name + T;
+
+        Implements[airname] = std::make_pair(mathname, llname);
+      }
+    }
+  }
+#if ENZYME_ENABLE_NVVM_ATTRIBUTION
+  for (auto &F : llvm::make_early_inc_range(M)) {
+    if (Begin) {
+      changed |= attributeKnownFunctions(F);
+    }
+  }
+#endif
+  SmallPtrSet<Constant *, 4> compilerUsed;
+  for (auto &F : M) {
+    auto found = Implements.find(F.getName());
+    if (found != Implements.end()) {
+      changed = true;
+      if (Begin) {
+        // As a side effect, enforces arguments
+        // cannot be erased.
+        F.addFnAttr("implements", found->second.second);
+        F.addFnAttr("implements2", found->second.first);
+        F.addFnAttr("enzyme_math", found->second.first);
+        changed |= preserveLinkage(Begin, F);
+      }
+    } else if (F.getName() == "_ZL21__internal_float2halffRjS_" ||
+               F.getName() == "_ZL4hlog6__half" ||
+               F.getName() == "_ZL6__hdiv6__halfS_" ||
+               F.getName() == "_ZL12__half2float6__half" ||
+               F.getName() == "_ZL6__habs6__half" ||
+               F.getName() == "_ZL5__hlt6__halfS_" ||
+               F.getName() == "_ZL6__hmul6__halfS_" ||
+               F.getName() == "_ZL6__hadd6__halfS_" ||
+               F.getName() == "_ZL5hsqrt6__half" ||
+               F.getName() == "_ZL6__hsub6__halfS_" ||
+               F.getName() == "_ZL4hexp6__half" ||
+               F.getName() == "_ZL6__hneg6__half" ||
+               F.getName() == "_ZL22__internal_device_hdiv13__nv_bfloat16S_" ||
+               F.getName() ==
+                   "_ZL27__internal_sm80_device_hmul13__nv_bfloat16S_" ||
+               F.getName() == "_ZL22__internal_device_hadd13__nv_bfloat16S_" ||
+               F.getName() ==
+                   "_ZL27__internal_sm80_device_hsub13__nv_bfloat16S_" ||
+               F.getName() == "_ZL22__internal_device_hneg13__nv_bfloat16" ||
+               F.getName() == "_ZL16__float2bfloat16f" ||
+               F.getName() == "_ZL25__internal_bfloat162floatt" ||
+               F.getName() == "_ZL32__internal_device_bfloat162floatt") {
+      changed = true;
+      if (Begin) {
+        changed |= preserveLinkage(Begin, F);
+      }
+    }
+    if (!Begin && F.hasFnAttribute("prev_fixup")) {
+      changed = true;
+      if (F.hasFnAttribute("prev_compiler_used")) {
+        F.removeFnAttr("prev_compiler_used");
+        compilerUsed.insert(&F);
+      }
+      F.removeFnAttr("prev_fixup");
+      if (F.hasFnAttribute("prev_always_inline")) {
+        F.addFnAttr(Attribute::AlwaysInline);
+        F.removeFnAttr("prev_always_inline");
+      }
+      if (F.hasFnAttribute("prev_no_inline")) {
+        F.removeFnAttr("prev_no_inline");
+      } else {
+        F.removeFnAttr(Attribute::NoInline);
+      }
+      int64_t val;
+      F.getFnAttribute("prev_linkage").getValueAsString().getAsInteger(10, val);
+      F.setLinkage((Function::LinkageTypes)val);
+    }
+  }
+#if LLVM_VERSION_MAJOR >= 20
+  // Only the LTO pre-link end pass, used from LLVM 20, adds these entries.
+  if (!compilerUsed.empty())
+    removeFromUsedLists(M, [&](Constant *C) { return compilerUsed.count(C); });
+#endif
+  return changed;
+}
+
+// The end of an LTO pre-link pipeline that deferred differentiation. Every
+// function Begin made external goes back to its original linkage: otherwise
+// each object file would define a strong copy of the static and inline
+// functions a rule names, and linking two of them fails on duplicate symbols.
+// Those that could now be dropped as unused are kept alive through
+// llvm.compiler.used until the post-link end pass, which also restores the
+// inlining attributes left in place here.
+static bool preserveNVVMLTOPreLinkEnd(Module &M) {
+  bool changed = false;
+  SmallVector<GlobalValue *, 4> keep;
+  for (auto &F : M) {
+    if (!F.hasFnAttribute("prev_fixup") ||
+        F.hasFnAttribute("prev_compiler_used"))
+      continue;
+    int64_t val;
+    F.getFnAttribute("prev_linkage").getValueAsString().getAsInteger(10, val);
+    auto L = (Function::LinkageTypes)val;
+    changed |= F.getLinkage() != L;
+    F.setLinkage(L);
+    if (GlobalValue::isDiscardableIfUnused(L) &&
+        !GlobalValue::isAvailableExternallyLinkage(L)) {
+      F.addFnAttr("prev_compiler_used");
+      keep.push_back(&F);
+    }
+  }
+  if (!keep.empty()) {
+    appendToCompilerUsed(M, keep);
+    changed = true;
+  }
+  return changed;
+}
+
+namespace {
+
+class PreserveNVVM final : public ModulePass {
+public:
+  static char ID;
+  bool Begin;
+  PreserveNVVM(bool Begin = true) : ModulePass(ID), Begin(Begin) {}
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override {}
+  bool runOnModule(Module &M) override { return preserveNVVM(Begin, M); }
+};
+
+class PreserveNVVMFn final : public FunctionPass {
+public:
+  static char ID;
+  bool Begin;
+  PreserveNVVMFn(bool Begin = true) : FunctionPass(ID), Begin(Begin) {}
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override {}
+  bool runOnFunction(Function &F) override {
+    return preserveNVVM(Begin, *F.getParent());
+  }
+};
+
+} // namespace
+
+char PreserveNVVM::ID = 0;
+
+char PreserveNVVMFn::ID = 0;
+
+static RegisterPass<PreserveNVVM> X("preserve-nvvm", "Preserve NVVM Pass");
+
+static RegisterPass<PreserveNVVMFn> XFn("preserve-nvvm-fn",
+                                        "Preserve NVVM Pass");
+
+ModulePass *createPreserveNVVMPass(bool Begin) {
+  return new PreserveNVVM(Begin);
+}
+
+FunctionPass *createPreserveNVVMFnPass(bool Begin) {
+  return new PreserveNVVMFn(Begin);
+}
+
+#include <llvm-c/Core.h>
+#include <llvm-c/Types.h>
+
+#include "llvm/IR/LegacyPassManager.h"
+
+extern "C" void AddPreserveNVVMPass(LLVMPassManagerRef PM, uint8_t Begin) {
+  unwrap(PM)->add(createPreserveNVVMPass((bool)Begin));
+}
+
+PreserveNVVMNewPM::Result
+PreserveNVVMNewPM::run(llvm::Module &M, llvm::ModuleAnalysisManager &MAM) {
+  bool changed = (!Begin && LTOPreLink)
+                     ? preserveNVVMLTOPreLinkEnd(M)
+                     : preserveNVVM(Begin, M, PreserveCustomRuleLinkage);
+  return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
+llvm::AnalysisKey PreserveNVVMNewPM::Key;

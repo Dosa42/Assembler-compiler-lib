@@ -1,0 +1,46 @@
+import {parseISO, format} from "date-fns";
+import {createPersistedRef} from "../storage";
+import {PREF_DATETIME_FORMAT} from "../pages/compare/prefs";
+
+// `time` has to be in seconds
+export function formatSecondsAsDuration(time: number): string {
+  let seconds = Math.trunc(time % 60);
+  let mins = Math.trunc(time / 60);
+  let hours = Math.trunc(mins / 60);
+  mins -= hours * 60;
+
+  let s = "";
+  if (hours > 0) {
+    s = `${hours}h ${mins < 10 ? "0" + mins : mins}m ${
+      seconds < 10 ? "0" + seconds : seconds
+    }s`;
+  } else {
+    s = `${mins < 10 ? " " + mins : mins}m ${
+      seconds < 10 ? "0" + seconds : seconds
+    }s`;
+  }
+  return s;
+}
+
+export const preferredDateTimeFormat = createPersistedRef(PREF_DATETIME_FORMAT);
+
+// Takes a date like `2025-09-10T08:22:47.161348Z` and formats it according to
+// the user preference stored in local storage (either 12 hour or 24 hour format).
+export function formatISODate(dateString?: string): string {
+  if (dateString) {
+    const dateFmt = preferredDateTimeFormat.value;
+    return format(parseISO(dateString), dateFmt);
+  }
+  return "";
+}
+
+export function parseDateIsoStringOrNull(dateString?: string): Date | null {
+  if (dateString) {
+    try {
+      return parseISO(dateString);
+    } catch (e) {
+      return null;
+    }
+  }
+  return null;
+}

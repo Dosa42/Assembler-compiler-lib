@@ -1,0 +1,6 @@
+{
+    "cargo_rustc_opts": "-Znext-solver=coherence",
+    "touch_file": "src/main.rs",
+    "category": "secondary",
+    "artifact": "binary"
+}

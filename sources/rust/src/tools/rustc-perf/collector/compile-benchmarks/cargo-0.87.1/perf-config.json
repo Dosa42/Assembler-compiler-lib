@@ -1,0 +1,9 @@
+{
+  "cargo_rustc_opts": "-Znext-solver=coherence",
+  "cargo_opts": "--lib",
+  "runs": 1,
+  "touch_file": "src/cargo/lib.rs",
+  "category": "primary",
+  "artifact": "library",
+  "frontend_threads": [1, 4]
+}

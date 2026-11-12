@@ -1,0 +1,431 @@
+//===-- AutoDiffOpInterface.td - Op Interface for auto diff-*- tablegen -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// This file defines the interfaces necessary to implement scalable automatic
+// differentiation across an unbounded number of MLIR IR constructs.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef ENZYME_MLIR_INTERFACES_AUTODIFFOPINTERFACES
+#define ENZYME_MLIR_INTERFACES_AUTODIFFOPINTERFACES
+
+include "mlir/IR/OpBase.td"
+
+def AutoDiffOpInterface : OpInterface<"AutoDiffOpInterface"> {
+  let description = [{
+    A differentiable MLIR operation that is able to emit forward mode adjoints for itself.
+  }];
+  let cppNamespace = "::mlir::enzyme";
+
+  let methods = [
+    InterfaceMethod<
+    /*desc=*/[{
+      Emits a forward-mode tangent of the given function. All IR manipulation
+      must go through the supplied arguments: `builder` is preset to insert new
+      IR in the correct location and should be used to construct any new IR;
+      `gutils` provides the mapping between main and derivative computation for
+      values and operations and should be updated to keep track of newly created
+      IR entities as well as of deleted entities. Returns success if generation
+      was successful.
+    }],
+    /*retTy=*/"::mlir::LogicalResult",
+    /*methodName=*/"createForwardModeTangent",
+    /*args=*/(ins "::mlir::OpBuilder &":$builder, "::mlir::enzyme::MGradientUtils *":$gutils)
+    >
+  ];
+}
+
+def ControlFlowAutoDiffOpInterface 
+    : OpInterface<"ControlFlowAutoDiffOpInterface"> {
+  let description = [{
+    A differentiable MLIR operation whose forward differentiation rules are
+    driven by how control flows through the operation.
+
+    There are two general assumptions:
+      - the operation can communicate additional values along the control flow
+        edges, which is used to put shadow values immediately after the primal
+        values;
+      - all values returned by the operation are yielded by all region-exiting
+        terminators.
+  }];
+  let cppNamespace = "::mlir::enzyme";
+  let methods =
+      [InterfaceMethod<
+           /*desc=*/[{
+        Creates a copy of this operation additionally carrying required shadow
+        values along control flow edges using the given builder. The `original`
+        is the operation in the original primal code prior to differentiation,
+        and this method is supposed to be called on the operation in the cloned
+        function being constructed. Remapped operands contains a flat list of
+        operands usable in the cloned function and can be fed to the Adaptor
+        constructor.
+      }],
+           /*retTy=*/"::mlir::Operation *",
+           /*methodName=*/"createWithShadows",
+           /*args=*/
+           (ins "::mlir::OpBuilder &":$builder,
+               "::mlir::enzyme::MGradientUtils *":$gutils,
+               "::mlir::Operation *":$original,
+               "::mlir::ValueRange":$remappedOperands,
+               "::mlir::TypeRange":$returnTypes)>,
+
+       InterfaceMethod<
+           /*desc=*/[{
+      Return entry successor operands for the given RegionBranchOpInterface and RegionSuccessor.
+      The default implementation here should work for most implementations of RegionBranchOpInterface,
+      but there are some that don't implement this method.
+    }],
+           /*retTy=*/"::mlir::OperandRange",
+           /*methodName=*/"getSuccessorOperands",
+           /*args=*/
+           (ins "::mlir::RegionBranchOpInterface &":$regionBranchOp,
+               "::mlir::RegionSuccessor const&":$successor),
+           /*methodBody=*/[{}],
+           /*defaultImplementation*/
+           [{return regionBranchOp.getEntrySuccessorOperands(successor);}]>];
+}
+
+def ReverseAutoDiffOpInterface : OpInterface<"ReverseAutoDiffOpInterface"> {
+  let description = [{
+    A differentiable MLIR operation that is able to emit reverse mode adjoints for itself.
+  }];
+  let cppNamespace = "::mlir::enzyme";
+
+  let methods = [
+    InterfaceMethod<
+    /*desc=*/[{
+      Emits a reverse-mode adjoint of the given function.
+    }],
+    /*retTy=*/"::mlir::LogicalResult",
+    /*methodName=*/"createReverseModeAdjoint",
+    /*args=*/(ins "::mlir::OpBuilder &":$builder, "::mlir::enzyme::MGradientUtilsReverse *":$gutils, "SmallVector<Value>":$caches)
+    >,
+
+    InterfaceMethod<
+    /*desc=*/[{
+      Creates or alters shadow values.
+    }],
+    /*retTy=*/"::mlir::LogicalResult",
+    /*methodName=*/"createShadowValues",
+    /*args=*/(ins "::mlir::OpBuilder &":$builder, "::mlir::enzyme::MGradientUtilsReverse *":$gutils)
+    >,
+
+    InterfaceMethod<
+    /*desc=*/[{
+      Caches values to create the adjoint.
+    }],
+    /*retTy=*/"SmallVector<Value>",
+    /*methodName=*/"cacheValues",
+    /*args=*/(ins "::mlir::enzyme::MGradientUtilsReverse *":$gutils)
+    >
+  ];
+}
+
+def StoreLikeInterface : OpInterface<"StoreLikeInterface"> {
+  let description = [{
+    A store-like operation that writes one operand (the value) through another
+    (the pointer/reference). Lets activity analysis reason about stored-value and
+    pointer activity without hard-coding specific dialects (memref.store,
+    LLVM.store, ...), which keeps the analysis dialect-agnostic and lets
+    out-of-tree dialects participate by attaching this interface.
+  }];
+  let cppNamespace = "::mlir::enzyme";
+
+  let methods = [InterfaceMethod<
+                     /*desc=*/"Returns the value written by this store.",
+                     /*retTy=*/"::mlir::Value",
+                     /*methodName=*/"getStoredValue">,
+                 InterfaceMethod<
+                     /*desc=*/"Returns the base pointer/reference this store "
+                              "writes through (before any potential offsets "
+                              "within the op are applied).",
+                     /*retTy=*/"::mlir::Value",
+                     /*methodName=*/"getStoredPointer">];
+}
+
+def LoadLikeInterface : OpInterface<"LoadLikeInterface"> {
+  let description = [{
+    A load-like operation that reads through a pointer or reference.
+  }];
+
+  let cppNamespace = "::mlir::enzyme";
+  let methods = [InterfaceMethod<
+      /*desc=*/"Returns the base pointer/reference this load reads through "
+               "(before any potential offsets within the op are applied).",
+      /*retTy=*/"::mlir::Value",
+      /*methodName=*/"getLoadedPointer">];
+}
+
+def AllocaLikeInterface : OpInterface<"AllocaLikeInterface"> {
+  let description = [{
+    An operation that allocates stack memory and returns a single
+    pointer or reference to it.
+  }];
+  let cppNamespace = "::mlir::enzyme";
+
+  let methods = [];
+}
+
+def MallocLikeInterface : OpInterface<"MallocLikeInterface"> {
+  let description = [{
+    An operation that allocates fresh heap memory and returns a single
+    pointer or reference to it.
+  }];
+  let cppNamespace = "::mlir::enzyme";
+  let methods = [];
+}
+
+def ActivityOpInterface
+    : OpInterface<"ActivityOpInterface"> {
+  let cppNamespace = "::mlir::enzyme";
+
+  let methods = [
+    InterfaceMethod<
+    /*desc=*/[{
+    }],
+    /*retTy=*/"bool",
+    /*methodName=*/"isInactive"
+    >,
+    InterfaceMethod<
+    /*desc=*/[{
+    }],
+    /*retTy=*/"bool",
+    /*methodName=*/"isArgInactive",
+    /*args=*/(ins "size_t":$opidx)
+    >
+  ];
+}
+
+def ADDataFlowOpInterface
+    : OpInterface<"ADDataFlowOpInterface"> {
+  let cppNamespace = "::mlir::enzyme";
+
+  let methods = [
+    InterfaceMethod<
+    /*desc=*/[{
+    }],
+    /*retTy=*/"SmallVector<Value>",
+    /*methodName=*/"getPotentialIncomingValuesRes",
+    /*args=*/(ins "::mlir::OpResult":$v)
+    >,
+    InterfaceMethod<
+    /*desc=*/[{
+    }],
+    /*retTy=*/"SmallVector<Value>",
+    /*methodName=*/"getPotentialIncomingValuesArg",
+    /*args=*/(ins "::mlir::BlockArgument":$v)
+    >,
+    InterfaceMethod<
+    /*desc=*/[{
+    }],
+    /*retTy=*/"SmallVector<Value>",
+    /*methodName=*/"getPotentialTerminatorUsers",
+    /*args=*/(ins "::mlir::Operation*":$terminator, "::mlir::Value":$val)
+    >
+  ];
+}
+
+def BatchOpInterface : OpInterface<"BatchOpInterface"> {
+  let description = [{
+    A batchable MLIR operation.
+  }];
+  let cppNamespace = "::mlir::enzyme";
+
+  let methods = [
+    InterfaceMethod<
+    /*desc=*/[{
+      Emits a batched version of a given operation and maps the newly created batched results to their correspondents in the original version.
+    }],
+    /*retTy=*/"::mlir::LogicalResult",
+    /*methodName=*/"createBatch",
+    /*args=*/(ins "::mlir::OpBuilder &":$builder, "::mlir::IRMapping &":$mapper, "::llvm::ArrayRef<int64_t>":$batchSizes)
+    >
+  ];
+}
+
+def EnzymeOpsRemoverOpInterface : OpInterface<"EnzymeOpsRemoverOpInterface"> {
+  let description = [{
+    An operation with nested operations which can move inner enzyme operations outside of itself.
+  }];
+  let cppNamespace = "::mlir::enzyme";
+
+  let methods = [
+    InterfaceMethod<
+    /*desc=*/[{
+      Pushes the nested enzyme operations outside of self.
+
+      Modifications to IR must be notified through the provided
+      PatternRewriter.
+    }],
+    /*retTy=*/"::mlir::LogicalResult",
+    /*methodName=*/"removeEnzymeOps",
+    /*args=*/(ins "::mlir::PatternRewriter &": $rewriter)
+    >
+  ];
+}
+
+def MathSimplifyInterface : OpInterface<"MathSimplifyInterface"> {
+  let description = [{
+    Simplify add/subtract with zero
+  }];
+  let cppNamespace = "::mlir::enzyme";
+
+  let methods = [
+    InterfaceMethod<
+    /*desc=*/[{
+      Simplify add/subtract with zero
+    }],
+    /*retTy=*/"::mlir::LogicalResult",
+    /*methodName=*/"simplifyMath",
+    /*args=*/(ins "::mlir::PatternRewriter &": $rewriter)
+    >
+  ];
+}
+
+def AutoDiffFunctionInterface : OpInterface<"AutoDiffFunctionInterface"> {
+  let description = [{
+    A function operation which can be automatically differentiated.
+  }];
+  let cppNamespace = "::mlir::enzyme";
+
+  let methods = [
+    InterfaceMethod<
+    /*desc=*/[{
+      Transform result types.
+    }],
+    /*retTy=*/"void",
+    /*methodName=*/"transformResultTypes",
+    /*args=*/(ins "SmallVectorImpl<::mlir::Type> &" : $resultTypes)
+    >,
+    InterfaceMethod<
+    /*desc=*/[{
+      Called on a derivative once it is in a symbol table under its own name, to
+      give up whatever it inherited from the primal it was cloned from that
+      names the primal rather than itself. For an llvm.func that is the comdat:
+      a group is kept or discarded whole, so a derivative left in the primal's
+      group is discarded along with it by any translation unit that offers the
+      primal without a derivative.
+    }],
+    /*retTy=*/"void",
+    /*methodName=*/"detachFromPrimalDefinition",
+    /*args=*/(ins)
+    >,
+    InterfaceMethod<
+    /*desc=*/[{
+      Get function type attr name.
+    }],
+    /*retTy=*/"StringRef",
+    /*methodName=*/"getFunctionTypeAttrName",
+    /*args=*/(ins),
+    /*methodBody=*/"",
+    /*defaultImplementation=*/[{
+      return $_op.getFunctionTypeAttrName();
+    }]
+    >,
+    InterfaceMethod<
+    /*desc=*/[{
+      Get arg attrs type attr name.
+    }],
+    /*retTy=*/"StringRef",
+    /*methodName=*/"getArgAttrsAttrName",
+    /*args=*/(ins),
+    /*methodBody=*/"",
+    /*defaultImplementation=*/[{
+      return $_op.getArgAttrsAttrName();
+    }]
+    >,
+    InterfaceMethod<
+    /*desc=*/[{
+      Generate call.
+    }],
+    /*retTy=*/"::mlir::Operation *",
+    /*methodName=*/"createCall",
+    /*args=*/(ins "::mlir::OpBuilder &" : $builder, "::mlir::Location" : $loc, "::mlir::ValueRange" : $args)
+    >,
+    InterfaceMethod<
+    /*desc=*/[{
+      Create return.
+    }],
+    /*retTy=*/"::mlir::Operation *",
+    /*methodName=*/"createReturn",
+    /*args=*/(ins "::mlir::OpBuilder &" : $builder, "::mlir::Location" : $loc, "::mlir::ValueRange" : $args)
+    >
+  ];
+}
+
+def FunctionReturnOpInterface : OpInterface<"FunctionReturnOpInterface"> {
+  let description = [{
+    Marks an operation that returns from its enclosing function.
+  }];
+  let cppNamespace = "::mlir::enzyme";
+}
+
+def MultidimensionalAllocInterface : OpInterface<"MultidimensionalAllocInterface"> {
+  let description = [{
+    An operation interface for allocation operations that support multi-dimensional allocations.
+  }];
+  let cppNamespace = "::mlir::enzyme";
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns whether the allocation operation can be hoisted out of the loop.
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"hoistable",
+      /*args=*/(ins "::mlir::Operation *":$forOp),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return $_op.getSymbolOperands().empty() &&
+               ::llvm::all_of($_op.getDynamicSizes(), [&](::mlir::Value dynSize) {
+                 return !forOp->getRegion(0).isAncestor(dynSize.getParentRegion());
+               });
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Appends dynamic sizes of this allocation to dynamicDims.
+      }],
+      /*retTy=*/"void",
+      /*methodName=*/"appendDynamicDims",
+      /*args=*/(ins "::llvm::SmallVectorImpl<::mlir::Value> &":$dynamicDims),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        dynamicDims.append($_op.getDynamicSizes().begin(),
+                           $_op.getDynamicSizes().end());
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Creates a new allocation of the same operation type.
+      }],
+      /*retTy=*/"::mlir::Value",
+      /*methodName=*/"allocate",
+      /*args=*/(ins "::mlir::OpBuilder &":$rewriter, "::mlir::Location":$loc, "::mlir::Type":$newType, "::mlir::ValueRange":$dynamicDims)
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Deallocates the given allocated memory.
+      }],
+      /*retTy=*/"void",
+      /*methodName=*/"deallocate",
+      /*args=*/(ins "::mlir::OpBuilder &":$rewriter, "::mlir::Location":$loc, "::mlir::Value":$val)
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns whether the given operation is a deallocation operation for this allocation type.
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"isDeallocation",
+      /*args=*/(ins "::mlir::Operation *":$op)
+    >
+  ];
+}
+
+#endif // ENZYME_MLIR_INTERFACES_AUTODIFFOPINTERFACES
+

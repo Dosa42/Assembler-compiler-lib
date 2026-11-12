@@ -1,0 +1,8 @@
+{
+  "cargo_rustc_opts": "-Znext-solver=coherence",
+  "touch_file": "crates/core/main.rs",
+  "category": "secondary",
+  "excluded_profiles": ["Doc", "Check", "Debug"],
+  "excluded_scenarios": ["IncrFull", "IncrPatched", "IncrUnchanged"],
+  "artifact": "binary"
+}

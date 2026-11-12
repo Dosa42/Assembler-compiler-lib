@@ -1,0 +1,54 @@
+<script setup lang="ts">
+/**
+ * This component displays a rustc-perf command for analyzing binary size diff between the baseline
+ * and the new commit.
+ **/
+
+import {CompileTestCase} from "../../common";
+import {ArtifactDescription} from "../../../types";
+import Tooltip from "../../../tooltip.vue";
+import {normalizeProfile} from "../../../../../utils/cargo";
+import {
+  cargo_collector_command,
+  normalizeBackendName,
+} from "../../../../../utils/cargo";
+
+const props = defineProps<{
+  artifact: ArtifactDescription;
+  baseArtifact: ArtifactDescription;
+  testCase: CompileTestCase;
+}>();
+</script>
+
+<template>
+  <div class="title">
+    Command for analyzing binary size locally
+    <Tooltip>
+      Execute this command in a checkout of
+      <a href="https://github.com/rust-lang/rustc-perf">rustc-perf</a>. Add
+      `--symbols` to include a diff of symbol sizes.
+    </Tooltip>
+  </div>
+
+  <pre><code>{{ cargo_collector_command() }} \
+    binary_stats compile \
+    +{{ props.baseArtifact.commit }} \
+    --rustc2 +{{ props.artifact.commit }} \
+    --exact-match {{ testCase.benchmark }} \
+    --profile {{ normalizeProfile(testCase.profile) }} \
+    --backend {{ normalizeBackendName(testCase.backend) }}</code></pre>
+</template>
+
+<style scoped lang="scss">
+.title {
+  font-weight: bold;
+}
+
+pre {
+  background-color: #eeeeee;
+}
+
+code {
+  user-select: all;
+}
+</style>
