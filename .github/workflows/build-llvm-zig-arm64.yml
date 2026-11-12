@@ -1,0 +1,355 @@
+name: Build LLVM and Zig ARM64 executables
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build-llvm-zig-arm64.yml
+      - sources/llvm-project/**
+      - sources/zig/**
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Component to build
+        type: choice
+        default: all
+        options: [all, llvm, zig]
+  workflow_call:
+    inputs:
+      component:
+        type: string
+        default: all
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      components: ${{ steps.select.outputs.components }}
+    steps:
+      - name: Select components
+        id: select
+        env:
+          REQUESTED_COMPONENT: ${{ inputs.component || 'all' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          selected = os.environ['REQUESTED_COMPONENT']
+          if selected not in ['all', 'llvm', 'zig']:
+              raise ValueError(selected)
+          components = ['llvm', 'zig'] if selected == 'all' else [selected]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('components=' + json.dumps(components) + '\n')
+          PY
+
+  build:
+    needs: plan
+    name: Build ${{ matrix.component }} for ARM64
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.plan.outputs.components) }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    env:
+      COMPONENT: ${{ matrix.component }}
+      CMAKE_BUILD_PARALLEL_LEVEL: '3'
+    steps:
+      - name: Check out imported sources
+        uses: actions/checkout@v7.0.1
+        with:
+          sparse-checkout: |
+            sources/llvm-project
+            sources/zig
+            sources/upstreams.json
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential clang lld cmake ninja-build python3-dev python3-setuptools swig libedit-dev libxml2-dev libncurses-dev zlib1g-dev libzstd-dev libffi-dev patchelf curl ca-certificates gnupg
+          test "$(uname -m)" = aarch64
+          mkdir -p build-logs dist stage
+
+      - name: Install Zig's required LLVM 23 development libraries
+        if: matrix.component == 'zig'
+        run: |
+          curl --fail --silent --show-error --location https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/llvm-snapshot.asc > /dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm-23.list
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang-23 lld-23 llvm-23-dev libclang-23-dev libclang-cpp23-dev liblld-23-dev libpolly-23-dev
+          /usr/lib/llvm-23/bin/llvm-config --version
+          /usr/lib/llvm-23/bin/llvm-config --targets-built
+
+      - name: Configure LLVM, Clang, LLD, LLDB and extra Clang tools
+        if: matrix.component == 'llvm'
+        run: |
+          cmake -S sources/llvm-project/llvm -B build/llvm -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_FLAGS_RELEASE='-O2 -DNDEBUG -g0' \
+            -DCMAKE_CXX_FLAGS_RELEASE='-O2 -DNDEBUG -g0' \
+            -DCMAKE_INSTALL_PREFIX=/opt/llvm \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            '-DCMAKE_INSTALL_RPATH=$ORIGIN/../lib' \
+            '-DLLVM_ENABLE_PROJECTS=clang;clang-tools-extra;lld;lldb' \
+            -DLLVM_TARGETS_TO_BUILD=all \
+            -DLLVM_BUILD_LLVM_DYLIB=ON \
+            -DLLVM_LINK_LLVM_DYLIB=ON \
+            -DCLANG_LINK_CLANG_DYLIB=ON \
+            -DLLVM_USE_LINKER=lld \
+            -DLLVM_PARALLEL_LINK_JOBS=1 \
+            -DLLVM_ENABLE_WERROR=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLDB_INCLUDE_TESTS=OFF \
+            -DLLDB_ENABLE_PYTHON=ON \
+            -DLLDB_ENABLE_LIBEDIT=ON \
+            -DLLDB_PYTHON_RELATIVE_PATH=lib/python3.12/site-packages \
+            2>&1 | tee build-logs/llvm-configure.log
+
+      - name: Configure Zig from imported source
+        if: matrix.component == 'zig'
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+
+          manifest = json.loads(Path('sources/upstreams.json').read_text())
+          source = next(item for item in manifest['repositories'] if item['path'] == 'sources/zig')
+          cmake_source = Path('sources/zig/CMakeLists.txt').read_text()
+          version = '.'.join(re.search(r'set\(ZIG_VERSION_' + field + r' (\d+)\)', cmake_source).group(1) for field in ['MAJOR', 'MINOR', 'PATCH'])
+          command = ['cmake', '-S', 'sources/zig', '-B', 'build/zig', '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_C_COMPILER=clang-23', '-DCMAKE_CXX_COMPILER=clang++-23', '-DCMAKE_PREFIX_PATH=/usr/lib/llvm-23', '-DCMAKE_INSTALL_PREFIX=/opt/zig', '-DZIG_SHARED_LLVM=ON', '-DZIG_USE_LLVM_CONFIG=ON', '-DZIG_TARGET_MCPU=baseline', '-DZIG_EXTRA_BUILD_ARGS=-j3', '-DZIG_VERSION=' + version + '-dev.0+' + source['commit'][:12]]
+          with Path('build-logs/zig-configure.log').open('w') as output:
+              result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT)
+          print(Path('build-logs/zig-configure.log').read_text())
+          result.check_returncode()
+          PY
+
+      - name: Compile LLVM core with every default target backend
+        if: matrix.component == 'llvm'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          log = Path('build-logs/llvm-core.log')
+          with log.open('w') as output:
+              process = subprocess.Popen(['cmake', '--build', 'build/llvm', '--parallel', '3', '--target', 'LLVM'], stdout=output, stderr=subprocess.STDOUT)
+              while process.poll() is None:
+                  try:
+                      process.wait(timeout=45)
+                  except subprocess.TimeoutExpired:
+                      print('LLVM core compilation running', flush=True)
+              if process.returncode:
+                  print('\n'.join(log.read_text(errors='replace').splitlines()[-120:]))
+                  raise subprocess.CalledProcessError(process.returncode, process.args)
+          PY
+
+      - name: Compile the executables
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+
+          component = os.environ['COMPONENT']
+          log = Path('build-logs') / (component + '-compile.log')
+          with log.open('w') as output:
+              process = subprocess.Popen(['cmake', '--build', 'build/' + component, '--parallel', '3'], stdout=output, stderr=subprocess.STDOUT)
+              while process.poll() is None:
+                  try:
+                      process.wait(timeout=45)
+                  except subprocess.TimeoutExpired:
+                      print(component + ' executable compilation running', flush=True)
+              if process.returncode:
+                  print('\n'.join(log.read_text(errors='replace').splitlines()[-120:]))
+                  raise subprocess.CalledProcessError(process.returncode, process.args)
+          PY
+
+      - name: Install, verify executables and package artifacts
+        run: |
+          python3 - <<'PY'
+          import datetime
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import subprocess
+
+          root = Path(os.environ['GITHUB_WORKSPACE'])
+          component = os.environ['COMPONENT']
+          work = root / 'build' / component
+          stage = root / 'stage' / component
+          prefix = stage / 'opt' / component
+          logs = root / 'build-logs'
+          smoke = root / 'build' / (component + '-smoke')
+          smoke.mkdir()
+          stage.mkdir(parents=True, exist_ok=True)
+          environment = dict(os.environ)
+          environment['LD_LIBRARY_PATH'] = str(prefix / 'lib') + os.pathsep + environment.get('LD_LIBRARY_PATH', '')
+          checks = []
+
+          def run(label, command, env=None):
+              log = logs / (component + '-' + label + '.log')
+              print(label + ': ' + ' '.join(str(part) for part in command), flush=True)
+              with log.open('w') as output:
+                  result = subprocess.run([str(part) for part in command], cwd=smoke, env=env or environment, stdout=output, stderr=subprocess.STDOUT)
+              text = log.read_text(errors='replace')
+              if result.returncode:
+                  print('\n'.join(text.splitlines()[-100:]))
+                  result.check_returncode()
+              return text
+
+          if component == 'llvm':
+              install_env = dict(os.environ, DESTDIR=str(stage))
+              run('install', ['cmake', '--install', work, '--strip'], install_env)
+          else:
+              shutil.copytree(work / 'stage3', prefix, symlinks=True)
+              libraries = prefix / 'lib'
+              libraries.mkdir(exist_ok=True)
+              binary = prefix / 'bin/zig'
+              dependencies = subprocess.check_output(['ldd', str(binary)], text=True)
+              base = {'libc.so.6', 'libm.so.6', 'libpthread.so.0', 'libdl.so.2', 'librt.so.1', 'libstdc++.so.6', 'libgcc_s.so.1'}
+              bundled = []
+              for line in dependencies.splitlines():
+                  match = re.match(r'\s*(\S+)\s+=>\s+(/\S+)', line)
+                  if match and match.group(1) not in base:
+                      name, path = match.groups()
+                      destination = libraries / name
+                      shutil.copy2(Path(path).resolve(), destination)
+                      subprocess.run(['patchelf', '--set-rpath', '$ORIGIN', str(destination)], check=True)
+                      bundled.append(name)
+              subprocess.run(['patchelf', '--set-rpath', '$ORIGIN/../lib', str(binary)], check=True)
+              (prefix / 'dependency-libraries.json').write_text(json.dumps(bundled, indent=2) + '\n')
+              checks.append('LLVM 23, Clang and LLD dependency libraries bundled with relative runtime paths')
+
+          hello = smoke / 'hello.c'
+          hello.write_text('#include <stdio.h>\nint main(void) { return puts("ARM64 C OK") < 0; }\n')
+          cpp = smoke / 'hello.cpp'
+          cpp.write_text('#include <iostream>\n#include <vector>\nint main() { std::vector<int> v{20,22}; std::cout << v[0]+v[1] << std::endl; }\n')
+          if component == 'llvm':
+              clang = prefix / 'bin/clang'
+              clangxx = prefix / 'bin/clang++'
+              lld = prefix / 'bin/ld.lld'
+              run('clang-version', [clang, '--version'])
+              run('compile-c', [clang, '-g', '-O0', hello, '-fuse-ld=' + str(lld), '-o', smoke / 'hello-c'])
+              assert 'ARM64 C OK' in run('execute-c', [smoke / 'hello-c'])
+              run('compile-cpp', [clangxx, '-std=c++17', '-O2', cpp, '-fuse-ld=' + str(lld), '-o', smoke / 'hello-cpp'])
+              assert run('execute-cpp', [smoke / 'hello-cpp']).strip() == '42'
+              checks.extend(['Built Clang and LLD compile, link and execute C and C++', 'C++ standard library program returns 42'])
+              ir = smoke / 'answer.ll'
+              ir.write_text('define i32 @answer() { ret i32 42 }\n')
+              run('assemble-ir', [prefix / 'bin/llvm-as', ir, '-o', smoke / 'answer.bc'])
+              run('optimize-ir', [prefix / 'bin/opt', '-passes=default<O2>', smoke / 'answer.bc', '-o', smoke / 'answer-opt.bc'])
+              run('compile-ir', [prefix / 'bin/llc', '-mtriple=aarch64-linux-gnu', '-filetype=obj', smoke / 'answer-opt.bc', '-o', smoke / 'answer.o'])
+              run('archive-object', [prefix / 'bin/llvm-ar', 'rcs', smoke / 'libanswer.a', smoke / 'answer.o'])
+              main = smoke / 'main.c'
+              main.write_text('extern int answer(void); int main(void) { return answer() == 42 ? 0 : 1; }\n')
+              run('link-archive', [clang, main, smoke / 'libanswer.a', '-fuse-ld=' + str(lld), '-o', smoke / 'answer'])
+              run('execute-ir-program', [smoke / 'answer'])
+              checks.append('LLVM assembler, optimizer, code generator and archiver produce an executed ARM64 program')
+              debugger = prefix / 'bin/lldb'
+              debug = run('debug', [debugger, '--batch', '-o', 'settings set target.disable-aslr false', '-o', 'target create ' + str(smoke / 'hello-c'), '-o', 'breakpoint set --name main', '-o', 'run', '-o', 'expression 6*7', '-o', 'continue'])
+              assert '= 42' in debug and 'ARM64 C OK' in debug
+              assert '42' in run('lldb-python', [debugger, '--batch', '-o', 'script print(6*7)'])
+              checks.append('Built LLDB debugs a program and executes Python')
+              for tool in ['clangd', 'clang-tidy', 'clang-format']:
+                  run(tool + '-version', [prefix / 'bin' / tool, '--version'])
+              run('lldb-server-version', [prefix / 'bin/lldb-server', 'version'])
+              targets = run('targets', [prefix / 'bin/llvm-config', '--targets-built'])
+              assert all(target in targets.split() for target in ['AArch64', 'ARM', 'X86', 'RISCV', 'WebAssembly'])
+              checks.append('All configured LLVM default target backends available: ' + targets.strip())
+          else:
+              zig = prefix / 'bin/zig'
+              run('version', [zig, 'version'])
+              run('environment', [zig, 'env'])
+              source = smoke / 'hello.zig'
+              source.write_text('extern "c" fn puts([*:0]const u8) c_int;\npub fn main() void { _ = puts("Zig ARM64 OK"); }\n')
+              run('compile-zig', [zig, 'build-exe', source, '-lc', '-fllvm', '-O', 'ReleaseFast', '-femit-bin=' + str(smoke / 'hello-zig')])
+              assert 'Zig ARM64 OK' in run('execute-zig', [smoke / 'hello-zig'])
+              test = smoke / 'test.zig'
+              test.write_text('const std = @import("std");\nfn add(a: u32, b: u32) u32 { return a + b; }\ntest "answer" { try std.testing.expectEqual(@as(u32, 42), add(20, 22)); }\n')
+              run('zig-test', [zig, 'test', test, '-fllvm', '-O', 'ReleaseFast'])
+              run('compile-c', [zig, 'cc', hello, '-O2', '-o', smoke / 'hello-c'])
+              assert 'ARM64 C OK' in run('execute-c', [smoke / 'hello-c'])
+              run('compile-cpp', [zig, 'c++', cpp, '-std=c++17', '-O2', '-o', smoke / 'hello-cpp'])
+              assert run('execute-cpp', [smoke / 'hello-cpp']).strip() == '42'
+              cross = smoke / 'cross.zig'
+              cross.write_text('export fn answer() u32 { return 42; }\n')
+              run('cross-compile', [zig, 'build-obj', cross, '-target', 'x86_64-linux-gnu', '-fllvm', '-O', 'ReleaseFast', '-femit-bin=' + str(smoke / 'x86_64.o')])
+              header = run('inspect-cross-object', ['readelf', '-h', smoke / 'x86_64.o'])
+              assert 'X86-64' in header
+              checks.extend(['Built Zig compiles and executes native Zig, C and C++', 'Zig tests pass with LLVM backend', 'Zig cross-compiles an x86_64 ELF object'])
+
+          metadata = prefix / 'share/build-info'
+          metadata.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(root / 'sources/upstreams.json', metadata / 'upstreams.json')
+          report = {'component': component, 'platform': 'ubuntu-24.04-arm64', 'repository_commit': os.environ['GITHUB_SHA'], 'checks': checks, 'completed_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+          (metadata / 'build.json').write_text(json.dumps(report, indent=2) + '\n')
+          source_root = root / 'sources' / ('llvm-project' if component == 'llvm' else 'zig')
+          (metadata / 'SOURCE.txt').write_text('https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/tree/' + os.environ['GITHUB_SHA'] + '/' + str(source_root.relative_to(root)) + '\n')
+          for relative in ['LICENSE', 'LICENSE.TXT', 'llvm/LICENSE.TXT', 'clang/LICENSE.TXT', 'lld/LICENSE.TXT', 'lldb/LICENSE.TXT', 'clang-tools-extra/LICENSE.TXT']:
+              license_file = source_root / relative
+              if license_file.is_file():
+                  destination = metadata / 'licenses' / relative
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(license_file, destination)
+          if component == 'zig':
+              packages = subprocess.check_output(['dpkg-query', '-W', '-f=${Package}\t${Version}\n', 'llvm-23-dev', 'libclang-cpp23', 'liblld-23'], text=True)
+              (metadata / 'dependency-packages.tsv').write_text(packages)
+              for package in ['libllvm23', 'libclang-cpp23', 'liblld-23']:
+                  copyright = Path('/usr/share/doc') / package / 'copyright'
+                  if copyright.is_file():
+                      shutil.copy2(copyright, metadata / (package + '-copyright'))
+          archive = root / 'dist' / (component + '-ubuntu-24.04-arm64.tar.xz')
+          epoch = subprocess.check_output(['git', '-C', str(root), 'show', '-s', '--format=%ct', 'HEAD'], text=True).strip()
+          archive_env = dict(os.environ, XZ_OPT='-T2 -1')
+          run('package', ['tar', '--sort=name', '--mtime=@' + epoch, '--owner=0', '--group=0', '--numeric-owner', '-cJf', archive, '-C', stage, '.'], archive_env)
+          digest = hashlib.sha256()
+          with archive.open('rb') as stream:
+              for chunk in iter(lambda: stream.read(1048576), b''):
+                  digest.update(chunk)
+          archive.with_suffix(archive.suffix + '.sha256').write_text(digest.hexdigest() + '  ' + archive.name + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(component + ' compiled from imported sources and verified\n\n' + '\n'.join('- ' + item for item in checks) + '\n')
+          PY
+
+      - name: Upload verified executables
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ matrix.component }}-ubuntu-24.04-arm64
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Preserve installed files when verification fails
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ matrix.component }}-unverified-stage
+          path: stage/
+          if-no-files-found: ignore
+          compression-level: 1
+          retention-days: 3
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ matrix.component }}-build-logs
+          path: |
+            build-logs/
+            build/**/CMakeCache.txt
+          if-no-files-found: ignore
+          retention-days: 14
