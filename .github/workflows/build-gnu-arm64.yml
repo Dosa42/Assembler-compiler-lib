@@ -70,6 +70,13 @@ jobs:
     steps:
       - name: Check out imported sources
         uses: actions/checkout@v7.0.1
+        with:
+          sparse-checkout: |
+            sources/gcc
+            sources/binutils-gdb
+            sources/newlib-cygwin
+            sources/glibc
+            sources/upstreams.json
 
       - name: Install build dependencies
         run: |
