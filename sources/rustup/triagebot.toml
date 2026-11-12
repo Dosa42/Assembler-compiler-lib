@@ -1,0 +1,23 @@
+[relabel]
+
+allow-unauthenticated = [
+  "bug",
+  "duplicate",
+  "enhancement",
+  "forwarded",
+  "performance",
+  "question",
+  "security",
+  "tracking",
+  "website",
+  "O-*",
+  "A-*",
+]
+
+[assign]
+contributing_url = "https://rust-lang.github.io/rustup/dev-guide"
+llm_policy_url = "https://rust-lang.github.io/rustup/dev-guide/#ai-policy"
+
+# Enable issue transfers within the org
+# Documentation at: https://forge.rust-lang.org/triagebot/transfer.html
+[transfer]

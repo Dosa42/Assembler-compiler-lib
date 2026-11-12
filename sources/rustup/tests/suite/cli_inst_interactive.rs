@@ -1,0 +1,861 @@
+//! Tests of the interactive console installer
+
+use std::{env::consts::EXE_SUFFIX, fs, io::Write, process::Stdio};
+
+use rustup::{
+    test::{
+        Assert, CROSS_ARCH1, CliTestContext, Config, SanitizedOutput, Scenario, this_host_tuple,
+    },
+    utils::raw,
+};
+
+fn run_input(config: &Config, args: &[&str], input: &str) -> Assert {
+    run_input_with_env(config, args, input, &[])
+}
+
+fn run_input_with_env(config: &Config, args: &[&str], input: &str, env: &[(&str, &str)]) -> Assert {
+    let mut cmd = config.cmd(args[0], &args[1..]);
+
+    for (key, value) in env.iter() {
+        cmd.env(key, value);
+    }
+
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+
+    Assert::new(SanitizedOutput {
+        status: out.status.code(),
+        stdout: String::from_utf8(out.stdout).unwrap(),
+        stderr: String::from_utf8(out.stderr).unwrap(),
+    })
+}
+
+#[tokio::test]
+async fn update() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+
+    run_input(&cx.config, &["rustup-init"], "\n\n");
+    run_input(&cx.config, &["rustup-init"], "\n\n").is_ok();
+}
+
+// Testing that the right number of blank lines are printed after the
+// 'pre-install' message and before the 'post-install' message - overall smoke
+// test for the install case.
+#[tokio::test]
+async fn smoke_case_install_no_modify_path() {
+    let mut cx = CliTestContext::new(Scenario::SimpleV2).await;
+    // Keep displayed paths short and shell detection independent of the host.
+    cx.config.cargodir = cx.config.homedir.join(".cargo");
+    // During an interactive session, after "Press the Enter
+    // key..."  the UI emits a blank line, then there is a blank
+    // line that comes from the user pressing enter, then log
+    // output on stderr, then an explicit blank line on stdout
+    // before printing $toolchain installed
+    run_input_with_env(
+        &cx.config,
+        &["rustup-init", "--no-modify-path"],
+        "\n\n",
+        &[
+            ("PATH", cx.config.exedir.to_str().unwrap()),
+            ("SHELL", "/bin/sh"),
+        ],
+    )
+    .with_stdout(snapbox::str![[r#"
+...
+This path needs to be in your PATH environment variable,
+but will not be added automatically.
+
+You can uninstall at any time with rustup self uninstall and
+these changes will be reverted.
+
+Current installation options:
+
+
+    default host tuple: [HOST_TUPLE]
+     default toolchain: stable (default)
+               profile: default
+  modify PATH variable: no
+
+1) Proceed with standard installation (default - just press enter)
+2) Customize installation
+3) Cancel installation
+>
+
+  stable-[HOST_TUPLE] installed - 1.1.0 (hash-stable-1.1.0)
+
+
+Rust is installed now. Great!
+...
+"#]])
+    .with_stdout(cfg_select! {
+        windows => snapbox::str![[r#"
+...
+Rust is installed now. Great!
+
+To get started you need Cargo's bin directory (%USERPROFILE%/.cargo/bin) in[..]
+your PATH
+environment variable. This has not been done automatically.
+
+Press the Enter key to continue.
+
+"#]],
+        _ => snapbox::str![[r#"
+...
+Rust is installed now. Great!
+
+To get started you need Cargo's bin directory ($HOME/.cargo/bin) in your PATH
+environment variable. This has not been done automatically.
+
+To configure your current shell, you need to source the
+corresponding env file under $HOME/.cargo.
+
+Consider running the right command for your shell (note the leading DOT):
+
+  . "$HOME/.cargo/env" # For sh/ash/dash/pdksh
+...
+"#]],
+    })
+    .is_ok();
+    if cfg!(unix) {
+        assert!(!cx.config.homedir.join(".profile").exists());
+        assert!(cx.config.cargodir.join("env").exists());
+    }
+}
+
+#[tokio::test]
+async fn smoke_case_install_with_path_install() {
+    let mut cx = CliTestContext::new(Scenario::SimpleV2).await;
+    cx.config.cargodir = cx.config.homedir.join(".cargo");
+
+    run_input_with_env(
+        &cx.config,
+        &["rustup-init"],
+        "\n\n",
+        &[
+            ("PATH", cx.config.exedir.to_str().unwrap()),
+            ("SHELL", "/bin/sh"),
+        ],
+    )
+    .is_ok()
+    .without_stdout("This path needs to be in your PATH environment variable")
+    .with_stdout(cfg_select! {
+        windows => snapbox::str![[r#"
+...
+Rust is installed now. Great!
+
+To get started you may need to restart your current shell.
+This would reload your PATH environment variable to include
+Cargo's bin directory (%USERPROFILE%/.cargo/bin).
+
+Press the Enter key to continue.
+
+"#]],
+        _ => snapbox::str![[r#"
+...
+Rust is installed now. Great!
+
+To get started you may need to restart your current shell.
+This would reload your PATH environment variable to include
+Cargo's bin directory ($HOME/.cargo/bin).
+
+To configure your current shell, you need to source the
+corresponding env file under $HOME/.cargo.
+
+Consider running the right command for your shell (note the leading DOT):
+
+  . "$HOME/.cargo/env" # For sh/ash/dash/pdksh
+...
+"#]],
+    });
+}
+
+#[tokio::test]
+async fn blank_lines_around_stderr_log_output_update() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    cx.config
+        .expect(["rustup-init", "-y", "--no-modify-path"])
+        .await
+        .is_ok();
+    run_input(
+        &cx.config,
+        &[
+            "rustup-init",
+            "--no-update-default-toolchain",
+            "--no-modify-path",
+        ],
+        "\n\n",
+    )
+    .with_stdout(snapbox::str![[r#"
+...
+3) Cancel installation
+>
+
+
+Rust is installed now. Great!
+...
+"#]]);
+}
+
+#[tokio::test]
+async fn installer_shows_default_host_tuple() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(&cx.config, &["rustup-init", "--no-modify-path"], "2\n").with_stdout(snapbox::str![
+        [r#"
+...
+Default host tuple? [[HOST_TUPLE]]
+...
+"#]
+    ]);
+}
+
+#[tokio::test]
+async fn installer_shows_default_toolchain_as_stable() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(&cx.config, &["rustup-init", "--no-modify-path"], "2\n\n").with_stdout(
+        snapbox::str![[r#"
+...
+Default toolchain? (stable/beta/nightly/none) [stable]
+...
+"#]],
+    );
+}
+
+#[tokio::test]
+async fn installer_shows_default_toolchain_when_set_in_args() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(
+        &cx.config,
+        &[
+            "rustup-init",
+            "--no-modify-path",
+            "--default-toolchain=nightly",
+        ],
+        "2\n\n",
+    )
+    .with_stdout(snapbox::str![[r#"
+...
+Default toolchain? (stable/beta/nightly/none) [nightly]
+...
+"#]]);
+}
+
+#[tokio::test]
+async fn installer_shows_default_profile() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(&cx.config, &["rustup-init", "--no-modify-path"], "2\n\n\n").with_stdout(
+        snapbox::str![[r#"
+...
+Profile (which tools and data to install)? (minimal/default/complete) [default]
+...
+"#]],
+    );
+}
+
+#[tokio::test]
+async fn installer_shows_default_profile_when_set_in_args() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(
+        &cx.config,
+        &["rustup-init", "--no-modify-path", "--profile=minimal"],
+        "2\n\n\n",
+    )
+    .with_stdout(snapbox::str![[r#"
+...
+Profile (which tools and data to install)? (minimal/default/complete) [minimal]
+...
+"#]]);
+}
+
+#[tokio::test]
+async fn installer_shows_default_for_modify_path() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(&cx.config, &["rustup-init"], "2\n\n\n\n").with_stdout(snapbox::str![[r#"
+...
+Modify PATH variable? (Y/n)
+...
+"#]]);
+}
+
+#[tokio::test]
+async fn installer_shows_default_for_modify_path_when_set_with_args() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(
+        &cx.config,
+        &["rustup-init", "--no-modify-path"],
+        "2\n\n\n\n",
+    )
+    .with_stdout(snapbox::str![[r#"
+...
+Modify PATH variable? (y/N)
+...
+"#]]);
+}
+
+#[tokio::test]
+async fn user_says_nope() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(&cx.config, &["rustup-init", "--no-modify-path"], "n\n\n").is_ok();
+    assert!(!cx.config.cargodir.join("bin").exists());
+}
+
+#[tokio::test]
+async fn with_no_toolchain() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(
+        &cx.config,
+        &[
+            "rustup-init",
+            "--no-modify-path",
+            "--default-toolchain=none",
+        ],
+        "\n\n",
+    )
+    .is_ok();
+
+    cx.config
+        .expect(["rustup", "show"])
+        .await
+        .with_stdout(snapbox::str![[r#"
+...
+no active toolchain
+...
+"#]])
+        .is_ok();
+}
+
+#[tokio::test]
+async fn with_no_toolchain_doesnt_hang() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(
+        &cx.config,
+        &[
+            "rustup-init",
+            "--no-modify-path",
+            "--default-toolchain=none",
+        ],
+        "\n\n",
+    )
+    .is_ok();
+
+    cx.config.expect(["rustup", "check"]).await.is_ok();
+}
+
+#[tokio::test]
+async fn with_no_toolchain_doesnt_hang_with_concurrent_downloads_override() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(
+        &cx.config,
+        &[
+            "rustup-init",
+            "--no-modify-path",
+            "--default-toolchain=none",
+        ],
+        "\n\n",
+    )
+    .is_ok();
+
+    cx.config
+        .expect_with_env(["rustup", "check"], [("RUSTUP_CONCURRENT_DOWNLOADS", "2")])
+        .await
+        .is_ok();
+}
+
+#[tokio::test]
+async fn with_non_default_toolchain_still_prompts() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(
+        &cx.config,
+        &[
+            "rustup-init",
+            "--no-modify-path",
+            "--default-toolchain=nightly",
+        ],
+        "\n\n",
+    )
+    .is_ok();
+
+    cx.config
+        .expect(["rustup", "show"])
+        .await
+        .with_stdout(snapbox::str![[r#"
+...
+installed toolchains
+--------------------
+nightly-[HOST_TUPLE] (active, default)
+...
+"#]])
+        .is_ok();
+}
+
+#[tokio::test]
+async fn with_non_release_channel_non_default_toolchain() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(
+        &cx.config,
+        &[
+            "rustup-init",
+            "--no-modify-path",
+            "--default-toolchain=nightly-2015-01-02",
+        ],
+        "\n\n",
+    )
+    .is_ok();
+
+    cx.config
+        .expect(["rustup", "show"])
+        .await
+        .with_stdout(snapbox::str![[r#"
+...
+installed toolchains
+--------------------
+nightly-2015-01-02-[HOST_TUPLE] (active, default)
+...
+"#]])
+        .is_ok();
+}
+
+#[tokio::test]
+async fn set_nightly_toolchain() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(
+        &cx.config,
+        &["rustup-init", "--no-modify-path"],
+        "2\n\nnightly\n\n\n\n\n",
+    )
+    .is_ok();
+
+    cx.config
+        .expect(["rustup", "show"])
+        .await
+        .with_stdout(snapbox::str![[r#"
+...
+installed toolchains
+--------------------
+nightly-[HOST_TUPLE] (active, default)
+...
+"#]])
+        .is_ok();
+}
+
+#[tokio::test]
+async fn set_no_modify_path() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(
+        &cx.config,
+        &["rustup-init", "--no-modify-path"],
+        "2\n\n\n\nno\n\n\n",
+    )
+    .is_ok();
+
+    if cfg!(unix) {
+        assert!(!cx.config.homedir.join(".profile").exists());
+    }
+}
+
+#[tokio::test]
+async fn set_nightly_toolchain_and_unset() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(
+        &cx.config,
+        &["rustup-init", "--no-modify-path"],
+        "2\n\nnightly\n\n\n2\n\nbeta\n\n\n\n\n",
+    )
+    .is_ok();
+
+    cx.config
+        .expect(["rustup", "show"])
+        .await
+        .with_stdout(snapbox::str![[r#"
+...
+installed toolchains
+--------------------
+beta-[HOST_TUPLE] (active, default)
+...
+"#]])
+        .is_ok();
+}
+
+#[tokio::test]
+async fn user_says_nope_after_advanced_install() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    run_input(
+        &cx.config,
+        &["rustup-init", "--no-modify-path"],
+        "2\n\n\n\n\nn\n\n\n",
+    )
+    .is_ok();
+    assert!(!cx.config.cargodir.join("bin").exists());
+}
+
+#[tokio::test]
+async fn install_with_components() {
+    async fn go(comp_args: &[&str]) {
+        let mut args = vec!["rustup-init", "-y", "--no-modify-path"];
+        args.extend_from_slice(comp_args);
+
+        let cx = CliTestContext::new(Scenario::SimpleV2).await;
+        cx.config.expect(&args).await.is_ok();
+        cx.config
+            .expect(["rustup", "component", "list"])
+            .await
+            .with_stdout(snapbox::str![[r#"
+...
+rust-src (installed)
+...
+"#]])
+            .is_ok();
+        cx.config
+            .expect(["rustup", "component", "list"])
+            .await
+            .with_stdout(snapbox::str![[r#"
+...
+rust-analysis-[HOST_TUPLE] (installed)
+...
+"#]])
+            .is_ok();
+    }
+
+    go(&["-c", "rust-src", "-c", "rust-analysis"]).await;
+    go(&["-c", "rust-src,rust-analysis"]).await;
+}
+
+#[tokio::test]
+async fn install_forces_and_skips_rls() {
+    let cx = CliTestContext::new(Scenario::UnavailableRls).await;
+    cx.config.set_current_dist_date("2015-01-01");
+
+    run_input(
+        &cx.config,
+        &[
+            "rustup-init",
+            "--profile",
+            "complete",
+            "--default-toolchain",
+            "nightly",
+            "--no-modify-path",
+        ],
+        "\n\n",
+    )
+    .is_ok()
+    .with_stderr(snapbox::str![[r#"
+...
+warn: skipping unavailable component rls
+...
+"#]]);
+}
+
+#[tokio::test]
+async fn test_warn_if_complete_profile_is_used() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    cx.config
+        .expect([
+            "rustup-init",
+            "-y",
+            "--profile",
+            "complete",
+            "--no-modify-path",
+        ])
+        .await
+        .with_stderr(snapbox::str![[r#"
+...
+warn: downloading with the `complete` profile is deprecated
+help: consider switching to the `default` profile with `rustup set profile default`
+...
+"#]])
+        .is_ok();
+}
+
+#[tokio::test]
+async fn installing_when_already_installed_updates_toolchain() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    cx.config
+        .expect(["rustup-init", "-y", "--no-modify-path"])
+        .await
+        .is_ok();
+    run_input(&cx.config, &["rustup-init", "--no-modify-path"], "\n\n").with_stdout(snapbox::str![
+        [r#"
+...
+[..]stable-[HOST_TUPLE] unchanged - 1.1.0 (hash-stable-1.1.0)
+...
+"#]
+    ]);
+}
+
+#[tokio::test]
+async fn install_stops_if_rustc_exists() {
+    let temp_dir = tempfile::Builder::new()
+        .prefix("fakebin")
+        .tempdir()
+        .unwrap();
+    // Create fake executable
+    let fake_exe = temp_dir.path().join(format!("{}{}", "rustc", EXE_SUFFIX));
+    raw::append_file(&fake_exe, "").unwrap();
+    let temp_dir_path = temp_dir.path().to_str().unwrap();
+
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    cx.config
+        .expect_with_env(
+            ["rustup-init", "--no-modify-path"],
+            [
+                ("RUSTUP_INIT_SKIP_PATH_CHECK", "no"),
+                ("PATH", temp_dir_path),
+            ],
+        )
+        .await
+        .is_err()
+        .with_stderr(snapbox::str![[r#"
+...
+warn: It looks like you have an existing installation of Rust at:
+...
+"#]]);
+}
+
+#[tokio::test]
+async fn install_stops_if_cargo_exists() {
+    let temp_dir = tempfile::Builder::new()
+        .prefix("fakebin")
+        .tempdir()
+        .unwrap();
+    // Create fake executable
+    let fake_exe = temp_dir.path().join(format!("{}{}", "cargo", EXE_SUFFIX));
+    raw::append_file(&fake_exe, "").unwrap();
+    let temp_dir_path = temp_dir.path().to_str().unwrap();
+
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    cx.config
+        .expect_with_env(
+            ["rustup-init", "--no-modify-path"],
+            [
+                ("RUSTUP_INIT_SKIP_PATH_CHECK", "no"),
+                ("PATH", temp_dir_path),
+            ],
+        )
+        .await
+        .is_err()
+        .with_stderr(snapbox::str![[r#"
+...
+warn: It looks like you have an existing installation of Rust at:
+...
+"#]]);
+}
+
+#[tokio::test]
+async fn with_no_prompt_install_succeeds_if_rustc_exists() {
+    let temp_dir = tempfile::Builder::new()
+        .prefix("fakebin")
+        .tempdir()
+        .unwrap();
+    // Create fake executable
+    let fake_exe = temp_dir.path().join(format!("{}{}", "rustc", EXE_SUFFIX));
+    raw::append_file(&fake_exe, "").unwrap();
+    let temp_dir_path = temp_dir.path().to_str().unwrap();
+
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    cx.config
+        .expect_with_env(
+            ["rustup-init", "-y", "--no-modify-path"],
+            [
+                ("RUSTUP_INIT_SKIP_PATH_CHECK", "no"),
+                ("PATH", temp_dir_path),
+            ],
+        )
+        .await
+        .is_ok();
+}
+
+// Issue 2547
+#[tokio::test]
+async fn install_non_installable_toolchain() {
+    let cx = CliTestContext::new(Scenario::Unavailable).await;
+    cx.config
+        .expect([
+            "rustup-init",
+            "-y",
+            "--no-modify-path",
+            "--default-toolchain",
+            "nightly",
+        ])
+        .await
+        .with_stderr(snapbox::str![[r#"
+...
+error: toolchain 'nightly-[HOST_TUPLE]' is not installable
+...
+"#]])
+        .is_err();
+}
+
+#[tokio::test]
+async fn install_warns_about_existing_settings_file() {
+    let temp_dir = tempfile::Builder::new()
+        .prefix("fakehome")
+        .tempdir()
+        .unwrap();
+    // Create `settings.toml`
+    let settings_file = temp_dir.path().join("settings.toml");
+    raw::write_file(
+        &settings_file,
+        &format!(
+            r#"default_toolchain = "{}"
+profile = "default"
+version = "12""#,
+            this_host_tuple()
+        ),
+    )
+    .unwrap();
+    let temp_dir_path = temp_dir.path().to_str().unwrap();
+
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    cx.config
+        .expect_with_env(
+            ["rustup-init", "-y", "--no-modify-path"],
+            [
+                ("RUSTUP_INIT_SKIP_PATH_CHECK", "no"),
+                ("RUSTUP_HOME", temp_dir_path),
+            ],
+        )
+        .await
+        .is_ok()
+        .with_stderr(snapbox::str![[r#"
+...
+warn: it looks like you have an existing rustup settings file at:
+...
+"#]]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn install_warns_if_default_linker_missing() {
+    // Fake PATH pointing to an empty directory so `cc` cannot be found
+    let temp_dir = tempfile::Builder::new()
+        .prefix("emptybin")
+        .tempdir()
+        .unwrap();
+    let temp_dir_path = temp_dir.path().to_str().unwrap();
+
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    cx.config
+        .expect_with_env(
+            ["rustup-init", "-y", "--no-modify-path"],
+            [("PATH", temp_dir_path)], // override PATH to hide system `cc`
+        )
+        .await
+        .is_ok()
+        .with_stderr(snapbox::str![[r#"
+...
+warn: no default linker ([CC_TOOL]) was found in your PATH
+warn: many Rust crates require a system C toolchain to build
+...
+"#]]);
+}
+
+#[tokio::test]
+async fn install_rejection_leaves_rustupdir_untouched() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+
+    let rustupdir = &cx.config.rustupdir.rustupdir;
+    let settings_file = &rustupdir.join("settings.toml");
+    fs::remove_dir_all(rustupdir).unwrap();
+
+    run_input(&cx.config, &["rustup-init", "--no-modify-path"], "3\n")
+        .with_stdout(snapbox::str![[r#"
+...
+This path needs to be in your PATH environment variable,
+but will not be added automatically.
+
+You can uninstall at any time with rustup self uninstall and
+these changes will be reverted.
+
+Current installation options:
+
+
+    default host tuple: [HOST_TUPLE]
+     default toolchain: stable (default)
+               profile: default
+  modify PATH variable: no
+
+1) Proceed with standard installation (default - just press enter)
+2) Customize installation
+3) Cancel installation
+>
+
+"#]])
+        .is_ok();
+
+    assert!(!settings_file.exists());
+    assert!(!rustupdir.exists());
+}
+
+// https://github.com/rust-lang/rustup/issues/3651#issuecomment-5058868560
+#[tokio::test]
+async fn install_defaults_to_default_host() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    let redactions = [("[RUSTUP_DIR]", &cx.config.rustupdir.to_string())];
+
+    cx.config
+        .expect([
+            "rustup-init",
+            "-y",
+            "--no-modify-path",
+            "--default-toolchain=beta",
+        ])
+        .await
+        .is_ok();
+
+    cx.config
+        .expect(["rustup", "show"])
+        .await
+        .extend_redactions(redactions)
+        .is_ok()
+        .with_stdout(snapbox::str![[r#"
+Default host: [HOST_TUPLE]
+rustup home:  [RUSTUP_DIR]
+
+installed toolchains
+--------------------
+beta-[HOST_TUPLE] (active, default)
+
+active toolchain
+----------------
+name: beta-[HOST_TUPLE]
+active because: it's the default toolchain
+installed targets:
+  [HOST_TUPLE]
+
+"#]]);
+
+    cx.config
+        .expect(["rustup", "set", "default-host", CROSS_ARCH1])
+        .await
+        .is_ok()
+        .with_stdout(snapbox::str![[r#""#]]);
+
+    cx.config
+        .expect_with_env(["rustup", "show"], [("RUSTUP_AUTO_INSTALL", "0")])
+        .await
+        .extend_redactions(redactions)
+        .is_ok()
+        .with_stdout(snapbox::str![[r#"
+Default host: [CROSS_ARCH_I]
+rustup home:  [RUSTUP_DIR]
+
+installed toolchains
+--------------------
+beta-[HOST_TUPLE]
+
+active toolchain
+----------------
+name: beta-[CROSS_ARCH_I]
+active because: it's the default toolchain
+
+"#]]);
+}

@@ -1,0 +1,856 @@
+//! Overview of toolchain modeling.
+//!
+//! From the user (including config files, toolchain files and manifests) we get
+//! a String. Strings are convertible into `MaybeChannelToolchainName`,
+//! `PartialToolchainName`, and `PartialToolchainNameOrPath`.
+//!
+//! `MaybeChannelToolchainName` represents a toolchain passed to rustup-init:
+//! 'none' to select no toolchain to install, and otherwise a partial toolchain
+//! description - channel and optional target tuple and optional date.
+//!
+//! `PartialToolchainName` represents a toolchain name from a user. Either a
+//! partial toolchain description or a single path component that is not 'none'.
+//!
+//! `MaybePartialToolchainName` is analogous to MaybeChannelToolchainName
+//! for both custom and official names.
+//!
+//! `ToolchainName` is the result of resolving `PartialToolchainName` with a
+//! host tuple, or parsing an installed toolchain name directly.
+//!
+//! `PartialToolchainNameOrPath` represents the values permittable in
+//! `RUSTUP_TOOLCHAIN`: resolved or not resolved official names, custom names,
+//! and absolute paths.
+//!
+//! `ToolchainNameOrPath` represents all the toolchain names that can make sense
+//! for referring to actually present toolchains. One of a `ToolchainName` or an
+//! absolute path.
+//!
+//! From the toolchains directory we can iterate directly over
+//! `ResolvedToolchainName`.
+//!
+//! ChannelToolchainName represents a resolved official toolchain name and can
+//! be used to download or install toolchains via a downloader.
+//!
+//! CustomToolchainName can be used to link toolchains to local paths on disk.
+//!
+//! ToolchainPath can be obtained from rustup toolchain files.
+//!
+//! State from toolchains on disk can be loaded in an InstalledToolchain struct
+//! and passed around and queried. The details on that are still vague :).
+//!
+//! Generally there are infallible Convert impl's for any safe conversion and
+//! fallible ones otherwise.
+
+use std::{
+    fmt::{self, Display},
+    io,
+    ops::Deref,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
+
+use fs_at::OpenOptions;
+use thiserror::Error;
+use unicode_security::GeneralSecurityProfile;
+
+use crate::{
+    config::{Cfg, no_toolchain_error},
+    dist::{ChannelToolchainName, PartialChannelToolchainName, TargetTuple},
+    errors::RustupError,
+    utils::raw::open_dir_following_links,
+};
+
+/// Errors related to toolchains
+#[derive(Error, Debug)]
+pub enum InvalidName {
+    #[error("invalid official toolchain name '{0}'")]
+    OfficialName(String),
+    #[error("invalid custom toolchain name '{0}'")]
+    CustomName(String),
+    #[error("invalid path toolchain '{0}'")]
+    PathToolchain(String),
+    #[error("relative path toolchain '{0}'")]
+    PathToolchainRelative(String),
+    #[error("invalid toolchain: the path '{0}' has no bin/ directory")]
+    ToolchainPath(String),
+    #[error("invalid toolchain name '{0}'")]
+    ToolchainName(String),
+    #[error("invalid toolchain name '+{0}'; valid toolchain names do not start with '+'")]
+    PlusPrefix(String),
+    #[error("invalid toolchain name '-{0}'; valid toolchain names do not start with '-'")]
+    DashPrefix(String),
+}
+
+/// An alias for a toolchain name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ToolchainAlias {
+    /// Refers to rustup's configured default toolchain
+    Default,
+}
+
+impl FromStr for ToolchainAlias {
+    type Err = InvalidName;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "default" => Ok(Self::Default),
+            _ => Err(InvalidName::ToolchainName(value.into())),
+        }
+    }
+}
+
+impl Display for ToolchainAlias {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Default => write!(f, "default"),
+        }
+    }
+}
+
+/// A wrapper for types that can be overridden by an alias.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Override<T> {
+    Aliased(ToolchainAlias),
+    Explicit(T),
+}
+
+impl<T: FromStr> FromStr for Override<T>
+where
+    T::Err: Into<InvalidName>,
+{
+    type Err = InvalidName;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Ok(alias) = ToolchainAlias::from_str(value) {
+            return Ok(Self::Aliased(alias));
+        }
+        match T::from_str(value) {
+            Ok(t) => Ok(Self::Explicit(t)),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+impl<T: Display> Display for Override<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Aliased(a) => write!(f, "{a}"),
+            Self::Explicit(t) => write!(f, "{t}"),
+        }
+    }
+}
+
+impl<T> Override<T>
+where
+    T: From<PartialToolchainName>,
+{
+    pub(crate) fn resolve(self, cfg: &Cfg<'_>) -> anyhow::Result<T> {
+        match self {
+            Self::Aliased(ToolchainAlias::Default) => {
+                let default = cfg
+                    .get_default_resolvable()?
+                    .ok_or_else(|| no_toolchain_error(cfg.process))?;
+                Ok(T::from(default))
+            }
+            Self::Explicit(value) => Ok(value),
+        }
+    }
+}
+
+/// A toolchain name from user input.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PartialToolchainName {
+    Custom(CustomToolchainName),
+    Channel(PartialChannelToolchainName),
+}
+
+impl PartialToolchainName {
+    /// Resolve to a concrete toolchain name
+    pub fn complete(self, host: &TargetTuple) -> Result<ToolchainName, anyhow::Error> {
+        Ok(match self {
+            Self::Custom(c) => ToolchainName::Custom(c),
+            Self::Channel(desc) => ToolchainName::Channel(desc.complete(host)?),
+        })
+    }
+}
+
+impl FromStr for PartialToolchainName {
+    type Err = InvalidName;
+
+    // If value could be resolved, return a ready to resolve version of it.
+    // Otherwise error.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let candidate = validate_name(value)?;
+        if let Ok(desc) = PartialChannelToolchainName::from_str(candidate) {
+            return Ok(Self::Channel(desc));
+        }
+
+        match CustomToolchainName::from_str(candidate) {
+            Ok(custom) => Ok(Self::Custom(custom)),
+            Err(_) => Err(InvalidName::ToolchainName(candidate.into())),
+        }
+    }
+}
+
+impl From<&PartialChannelToolchainName> for PartialToolchainName {
+    fn from(value: &PartialChannelToolchainName) -> Self {
+        Self::Channel(value.to_owned())
+    }
+}
+
+impl Display for PartialToolchainName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Custom(c) => write!(f, "{c}"),
+            Self::Channel(o) => write!(f, "{o}"),
+        }
+    }
+}
+
+/// A toolchain name from user input. MaybeToolchainName accepts 'none' or a
+/// custom or resolvable official name. Possibly this should be an Option with a
+/// local trait for our needs.
+#[derive(Debug, Clone)]
+pub(crate) enum MaybePartialToolchainName {
+    Some(PartialToolchainName),
+    None,
+}
+
+impl FromStr for MaybePartialToolchainName {
+    type Err = InvalidName;
+
+    // If value could be resolved, return a ready to resolve version of it.
+    // Otherwise error.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(match normalize_name(value)? {
+            "none" => Self::None,
+            candidate => Self::Some(PartialToolchainName::from_str(candidate)?),
+        })
+    }
+}
+
+impl Display for MaybePartialToolchainName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Some(t) => write!(f, "{t}"),
+            Self::None => write!(f, "none"),
+        }
+    }
+}
+
+impl From<PartialToolchainName> for MaybePartialToolchainName {
+    fn from(value: PartialToolchainName) -> Self {
+        Self::Some(value)
+    }
+}
+
+/// PartialToolchainName + none, for overriding default-has-a-value
+/// situations in the CLI with an official toolchain name or none
+#[derive(Debug, Clone)]
+pub(crate) enum MaybeChannelToolchainName {
+    None,
+    Some(PartialChannelToolchainName),
+}
+
+impl FromStr for MaybeChannelToolchainName {
+    type Err = InvalidName;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(match validate_name(value)? {
+            "none" => Self::None,
+            candidate => Self::Some(
+                PartialChannelToolchainName::from_str(candidate)
+                    .map_err(|_| InvalidName::OfficialName(candidate.into()))?,
+            ),
+        })
+    }
+}
+
+impl Display for MaybeChannelToolchainName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Some(t) => write!(f, "{t}"),
+        }
+    }
+}
+
+/// ToolchainName can be used in calls to Cfg that alter configuration,
+/// like setting overrides, or that depend on configuration, like calculating
+/// the toolchain directory.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum ToolchainName {
+    Channel(ChannelToolchainName),
+    Custom(CustomToolchainName),
+}
+
+impl ToolchainNameExt for ToolchainName {}
+
+impl From<ChannelToolchainName> for ToolchainName {
+    fn from(value: ChannelToolchainName) -> Self {
+        Self::Channel(value)
+    }
+}
+
+impl From<CustomToolchainName> for ToolchainName {
+    fn from(value: CustomToolchainName) -> Self {
+        Self::Custom(value)
+    }
+}
+
+impl FromStr for ToolchainName {
+    type Err = InvalidName;
+
+    /// If the string is already resolved, allow direct conversion
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let candidate = validate_name(value)?;
+        if let Ok(desc) = ChannelToolchainName::from_str(candidate) {
+            return Ok(Self::Channel(desc));
+        }
+
+        match CustomToolchainName::from_str(candidate) {
+            Ok(custom) => Ok(Self::Custom(custom)),
+            Err(_) => Err(InvalidName::ToolchainName(candidate.into())),
+        }
+    }
+}
+
+impl Display for ToolchainName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Custom(t) => write!(f, "{t}"),
+            Self::Channel(t) => write!(f, "{t}"),
+        }
+    }
+}
+
+/// PartialToolchainNameOrPath is used to process values set in
+/// RUSTUP_TOOLCHAIN: resolvable and resolved official names, custom names and
+/// absolute paths.
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub(crate) enum PartialToolchainNameOrPath {
+    Named(PartialToolchainName),
+    Path(ToolchainPath),
+}
+
+impl PartialToolchainNameOrPath {
+    /// Resolve to a concrete toolchain name
+    pub fn complete(&self, host: &TargetTuple) -> Result<ToolchainNameOrPath, anyhow::Error> {
+        match self.clone() {
+            Self::Named(t) => Ok(ToolchainNameOrPath::Named(t.complete(host)?)),
+            Self::Path(t) => Ok(ToolchainNameOrPath::Path(t)),
+        }
+    }
+}
+
+impl From<PartialChannelToolchainName> for PartialToolchainName {
+    fn from(value: PartialChannelToolchainName) -> Self {
+        Self::Channel(value)
+    }
+}
+
+impl From<CustomToolchainName> for PartialToolchainName {
+    fn from(value: CustomToolchainName) -> Self {
+        Self::Custom(value)
+    }
+}
+
+impl FromStr for PartialToolchainNameOrPath {
+    type Err = InvalidName;
+
+    /// Parses a resolvable toolchain, or a path based toolchain.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let candidate = normalize_name(value)?;
+        if let Ok(name) = PartialToolchainName::from_str(candidate) {
+            return Ok(Self::Named(name));
+        }
+
+        if candidate.contains('/') || candidate.contains('\\') {
+            let path = PathBuf::from(candidate);
+            let path = ToolchainPath::try_from(&path as &Path)?;
+            return Ok(Self::Path(path));
+        }
+
+        Err(InvalidName::ToolchainName(candidate.into()))
+    }
+}
+
+impl Display for PartialToolchainNameOrPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Named(t) => write!(f, "{t}"),
+            Self::Path(t) => write!(f, "{t}"),
+        }
+    }
+}
+
+impl From<PartialToolchainName> for PartialToolchainNameOrPath {
+    fn from(value: PartialToolchainName) -> Self {
+        Self::Named(value)
+    }
+}
+
+/// ToolchainNameOrPath can be used in calls to Cfg that alter configuration,
+/// like setting overrides, or that depend on configuration, like calculating
+/// the toolchain directory. It is not used to model the RUSTUP_TOOLCHAIN
+/// variable, because that can take unresolved toolchain values that are not
+/// invalid for referring to an installed toolchain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ToolchainNameOrPath {
+    Named(ToolchainName),
+    Path(ToolchainPath),
+}
+
+impl ToolchainNameExt for ToolchainNameOrPath {
+    fn path(&self, cfg: &Cfg<'_>) -> PathBuf {
+        match self {
+            Self::Named(name) => name.path(cfg),
+            Self::Path(p) => p.to_path_buf(),
+        }
+    }
+}
+
+impl From<ToolchainName> for ToolchainNameOrPath {
+    fn from(value: ToolchainName) -> Self {
+        Self::Named(value)
+    }
+}
+
+impl From<ToolchainPath> for ToolchainNameOrPath {
+    fn from(value: ToolchainPath) -> Self {
+        Self::Path(value)
+    }
+}
+
+impl From<ChannelToolchainName> for ToolchainNameOrPath {
+    fn from(value: ChannelToolchainName) -> Self {
+        ToolchainName::Channel(value).into()
+    }
+}
+
+impl From<CustomToolchainName> for ToolchainNameOrPath {
+    fn from(value: CustomToolchainName) -> Self {
+        ToolchainName::Custom(value).into()
+    }
+}
+
+impl PartialEq<ToolchainName> for ToolchainNameOrPath {
+    fn eq(&self, other: &ToolchainName) -> bool {
+        match self {
+            Self::Named(n) => n == other,
+            _ => false,
+        }
+    }
+}
+
+impl Display for ToolchainNameOrPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Named(t) => write!(f, "{t}"),
+            Self::Path(t) => write!(f, "{t}"),
+        }
+    }
+}
+
+/// A custom toolchain name, but not an official toolchain name
+/// (e.g. my-custom-toolchain)
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct CustomToolchainName(String);
+
+impl Deref for CustomToolchainName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for CustomToolchainName {
+    type Err = InvalidName;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let candidate = validate_name(value).map_err(|_| InvalidName::CustomName(value.into()))?;
+        if candidate.parse::<PartialChannelToolchainName>().is_ok() || candidate == "none" {
+            Err(InvalidName::CustomName(candidate.into()))
+        } else {
+            Ok(Self(candidate.into()))
+        }
+    }
+}
+
+impl Display for CustomToolchainName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// An toolchain specified just via its path. Relative paths enable arbitrary
+/// code execution in a rust dir, so as a partial mitigation is limited to
+/// absolute paths.
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct ToolchainPath(PathBuf, String);
+
+impl From<ToolchainPath> for PathBuf {
+    fn from(value: ToolchainPath) -> Self {
+        value.0
+    }
+}
+
+impl Display for ToolchainPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0.display())
+    }
+}
+
+impl TryFrom<&Path> for ToolchainPath {
+    type Error = InvalidName;
+
+    fn try_from(value: &Path) -> Result<Self, Self::Error> {
+        // if official || at least a single path component
+        let as_str = value.display().to_string();
+        if PartialChannelToolchainName::from_str(&as_str).is_ok()
+            || !(as_str.contains('/') || as_str.contains('\\'))
+        {
+            Err(InvalidName::PathToolchain(as_str))
+        } else {
+            // Perform minimal validation; there should at least be a `bin/` that might
+            // contain things for us to run.
+            if !value.is_absolute() {
+                Err(InvalidName::PathToolchainRelative(as_str))
+            } else if !value.join("bin").is_dir() {
+                Err(InvalidName::ToolchainPath(as_str))
+            } else {
+                Ok(Self(value.into(), as_str))
+            }
+        }
+    }
+}
+
+impl TryFrom<&ToolchainNameOrPath> for ToolchainPath {
+    type Error = InvalidName;
+
+    fn try_from(value: &ToolchainNameOrPath) -> Result<Self, Self::Error> {
+        match value {
+            ToolchainNameOrPath::Named(_) => Err(InvalidName::PathToolchain(format!("{value}"))),
+            ToolchainNameOrPath::Path(n) => Ok(n.clone()),
+        }
+    }
+}
+
+impl Deref for ToolchainPath {
+    type Target = PathBuf;
+
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+/// Extension methods for a generic toolchain name.
+pub trait ToolchainNameExt: Display {
+    /// Checks if the toolchain is already installed.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)` if the toolchain exists.
+    /// - `Ok(false)` if the toolchain or its containing directory don't exist.
+    /// - `Err(_)` if there was an error checking for the toolchain's existence.
+    fn exists(&self, cfg: &Cfg<'_>) -> Result<bool, RustupError> {
+        let path = self.path(cfg);
+        // toolchain validation should have prevented a situation where there is
+        // no base dir, but defensive programming is defensive.
+        let invalid_name = || RustupError::InvalidToolchainName(self.to_string());
+        let parent = path.parent().ok_or_else(invalid_name)?;
+        let base_name = path.file_name().ok_or_else(invalid_name)?;
+        let parent_dir = match open_dir_following_links(parent) {
+            Ok(d) => d,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            e => e?,
+        };
+        let opened = OpenOptions::default()
+            .read(true)
+            .follow(true)
+            .open_dir_at(&parent_dir, base_name);
+        Ok(opened.is_ok())
+    }
+
+    /// Provides the path to the toolchain's root directory.
+    fn path(&self, cfg: &Cfg<'_>) -> PathBuf {
+        cfg.toolchains_dir.join(self.to_string())
+    }
+}
+
+/// Common validate rules for toolchain names that aren't paths.
+///
+/// Beyond the shared [`normalize_name`] rules, every character must be allowed in an
+/// identifier by the Unicode general security profile (UTS #39). That admits
+/// ASCII letters, digits, `.`, `_` and `-` -- so every official toolchain name
+/// still parses -- along with unicode identifiers such as `合法的`, while
+/// rejecting whitespace, most punctuation, emoji, and invisible or
+/// direction-altering characters.
+fn validate_name(candidate: &str) -> Result<&str, InvalidName> {
+    let candidate = normalize_name(candidate)?;
+    // A leading `-` reads as a flag to the argument parser, the same way a
+    // leading `+` reads as a toolchain to us, so a name starting with one can
+    // only be reached via `--`.
+    if let Some(without_dash) = candidate.strip_prefix('-') {
+        return Err(InvalidName::DashPrefix(without_dash.to_owned()));
+    }
+    // `.` and `..` pass the profile but would escape or alias the toolchains
+    // directory, so they need rejecting on their own.
+    if !matches!(candidate, "." | "..")
+        && candidate
+            .chars()
+            .all(|c| c.identifier_allowed() && !EXCLUDED.contains(&c))
+    {
+        Ok(candidate)
+    } else {
+        Err(InvalidName::ToolchainName(candidate.to_owned()))
+    }
+}
+
+/// Normalizes candidate toolchain name using generic rules.
+///
+/// Strips the trailing slashes a shell may have completed onto a toolchain
+/// directory, and rejects the `+toolchain` argument form along with names that
+/// are empty once normalized.
+fn normalize_name(candidate: &str) -> Result<&str, InvalidName> {
+    if let Some(without_plus) = candidate.strip_prefix('+') {
+        return Err(InvalidName::PlusPrefix(without_plus.to_string()));
+    }
+    let normalized_name = candidate.trim_end_matches('/');
+    if normalized_name.is_empty() {
+        Err(InvalidName::ToolchainName(candidate.into()))
+    } else {
+        Ok(normalized_name)
+    }
+}
+
+/// Characters that UTS #39 permits in identifiers but that we reject anyway,
+/// because a named toolchain also has to work as a directory name under
+/// `.rustup/toolchains`: `:` would open an NTFS alternate data stream, and `'`
+/// needs quoting in enough shells to be a nuisance.
+const EXCLUDED: &[char] = &[':', '\''];
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use proptest::{collection::vec, prelude::*, string::string_regex};
+
+    use crate::{
+        dist::{
+            PartialChannelToolchainName,
+            target_tuple::known::{LIST_ARCHS, LIST_ENVS, LIST_OSES},
+        },
+        toolchain::names::{CustomToolchainName, InvalidName, PartialToolchainName, ToolchainName},
+    };
+
+    fn partial_toolchain_desc_regex() -> String {
+        let tuple_regex = format!(
+            r"(-({}))?(?:-({}))?(?:-({}))?",
+            regex_alternates(LIST_ARCHS),
+            regex_alternates(LIST_OSES),
+            regex_alternates(LIST_ENVS)
+        );
+        r"(nightly|beta|stable|[0-9]{1}(\.(0|[1-9][0-9]{0,2}))(\.(0|[1-9][0-9]{0,1}))?(-beta(\.(0|[1-9][1-9]{0,1}))?)?)(-([0-9]{4}-[0-9]{2}-[0-9]{2}))?".to_owned() + &tuple_regex
+    }
+
+    fn regex_alternates(values: &[&str]) -> String {
+        values
+            .iter()
+            .map(|value| regex::escape(value))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    prop_compose! {
+        fn arb_partial_toolchain_desc()
+            (s in string_regex(&partial_toolchain_desc_regex()).unwrap()) -> String {
+            s
+        }
+    }
+
+    prop_compose! {
+        fn arb_custom_name()
+            (s in r"[A-Za-z0-9._-]+") -> String {
+                // perhaps need to filter 'none' and partial toolchains - but they won't typically be generated anyway.
+                s
+        }
+    }
+
+    prop_compose! {
+        fn arb_resolvable_name()
+            (case in (0..=1), desc in arb_custom_name(), name in arb_partial_toolchain_desc() ) -> String {
+                match case  {
+                    0 => name,
+                    _d => desc
+                }
+            }
+    }
+
+    prop_compose! {
+        fn arb_abspath_name()
+            (case in (0..=1), segments in vec("[^\\/]", 0..5)) -> String {
+                match case {
+                    0 => format!("/{}", segments.join("/")),
+                    _ => format!(r"c:\{}", segments.join(r"\"))
+                }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn test_parse_partial_desc(desc in arb_partial_toolchain_desc()) {
+            PartialChannelToolchainName::from_str(&desc).unwrap();
+        }
+
+        #[test]
+        fn test_parse_custom(name in arb_custom_name()) {
+            prop_assume!(name != "none");
+            prop_assume!(name != ".");
+            prop_assume!(name != "..");
+            prop_assume!(!name.starts_with('-'));
+            prop_assume!(PartialChannelToolchainName::from_str(&name).is_err());
+            CustomToolchainName::from_str(&name).unwrap();
+        }
+
+        #[test]
+        fn test_parse_resolvable_name(name in arb_resolvable_name()) {
+            prop_assume!(name != "none");
+            prop_assume!(name != ".");
+            prop_assume!(name != "..");
+            prop_assume!(!name.starts_with('-'));
+            PartialToolchainName::from_str(&name).unwrap();
+        }
+
+        // TODO: This needs some thought
+        // #[test]
+        // fn test_parse_abs_path_name(name in arb_abspath_name()) {
+        //     let tempdir = tempfile::Builder::new().tempdir().unwrap();
+        //     let d = tempdir.into_path();
+        //     fs::create_dir(d.create_directory("bin").unwrap()).unwrap();
+        // // .into_path())
+
+        //     ToolchainPath::try_from(Path::new(&name)).unwrap();
+        // }
+
+    }
+
+    #[test]
+    fn test_toolchain_sort() {
+        let expected = vec![
+            "stable-x86_64-unknown-linux-gnu",
+            "beta-x86_64-unknown-linux-gnu",
+            "nightly-x86_64-unknown-linux-gnu",
+            "nightly-2015-01-01-x86_64-unknown-linux-gnu",
+            "1.0.0-x86_64-unknown-linux-gnu",
+            "1.2.0-x86_64-unknown-linux-gnu",
+            "1.8-beta-x86_64-apple-darwin",
+            "1.8.0-beta-x86_64-apple-darwin",
+            "1.8.0-beta.2-x86_64-apple-darwin",
+            "1.8.0-x86_64-apple-darwin",
+            "1.8.0-x86_64-unknown-linux-gnu",
+            "1.10.0-x86_64-unknown-linux-gnu",
+            "bar.baz",
+            "foo_bar",
+            "stage1-local",
+            "this.is.not-a_semver",
+        ]
+        .into_iter()
+        .map(|s| ToolchainName::from_str(s).unwrap())
+        .collect::<Vec<_>>();
+
+        let mut v = vec![
+            "1.8.0-x86_64-unknown-linux-gnu",
+            "1.0.0-x86_64-unknown-linux-gnu",
+            "nightly-x86_64-unknown-linux-gnu",
+            "nightly-2015-01-01-x86_64-unknown-linux-gnu",
+            "stable-x86_64-unknown-linux-gnu",
+            "1.10.0-x86_64-unknown-linux-gnu",
+            "beta-x86_64-unknown-linux-gnu",
+            "1.2.0-x86_64-unknown-linux-gnu",
+            // https://github.com/rust-lang/rustup/issues/1329
+            "1.8.0-x86_64-apple-darwin",
+            "1.8-beta-x86_64-apple-darwin",
+            "1.8.0-beta-x86_64-apple-darwin",
+            "1.8.0-beta.2-x86_64-apple-darwin",
+            // https://github.com/rust-lang/rustup/issues/3517
+            "foo_bar",
+            "bar.baz",
+            "this.is.not-a_semver",
+            // https://github.com/rust-lang/rustup/issues/3168
+            "stage1-local",
+        ]
+        .into_iter()
+        .map(|s| ToolchainName::from_str(s).unwrap())
+        .collect::<Vec<_>>();
+
+        v.sort();
+
+        assert_eq!(expected, v);
+    }
+
+    #[test]
+    fn custom_names_reject_special_characters() {
+        for name in [
+            "bar(baz)",
+            "foo#bar",
+            "the cake is a lie",
+            "this.is.not-a+semver",
+            ".",
+            "..",
+            // permitted by UTS #39, excluded by us
+            "quote'toolchain",
+            "stream:name",
+            "-dash-prefixed",
+            "--flag-lookalike",
+            // rejected by UTS #39
+            "µ",                 // MICRO SIGN, restricted in favour of U+03BC
+            "🦀",                // emoji
+            "tilde~home",        // not identifier punctuation
+            "abc\u{202E}def",    // RIGHT-TO-LEFT OVERRIDE
+            "zero\u{200D}width", // ZERO WIDTH JOINER
+            "no\u{00A0}break",   // NO-BREAK SPACE
+        ] {
+            CustomToolchainName::from_str(name).unwrap_err();
+            PartialToolchainName::from_str(name).unwrap_err();
+            ToolchainName::from_str(name).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn custom_names_accept_unicode_identifiers() {
+        for name in ["合法的", "μ", "café", "Ελληνικά", "тулчейн"] {
+            CustomToolchainName::from_str(name).unwrap();
+            PartialToolchainName::from_str(name).unwrap();
+            ToolchainName::from_str(name).unwrap();
+        }
+    }
+
+    #[test]
+    fn dash_prefixed_names_report_the_dash() {
+        // a generic "invalid toolchain name" would not tell the user what to fix
+        assert!(matches!(
+            CustomToolchainName::from_str("-foo"),
+            Err(InvalidName::CustomName(_))
+        ));
+        assert!(matches!(
+            ToolchainName::from_str("-foo"),
+            Err(InvalidName::DashPrefix(name)) if name == "foo"
+        ));
+        // a dash anywhere else is still fine
+        ToolchainName::from_str("a-b").unwrap();
+    }
+
+    #[test]
+    fn official_names_survive_the_identifier_profile() {
+        for name in [
+            "stable-x86_64-unknown-linux-gnu",
+            "nightly-2015-01-01-aarch64-apple-darwin",
+            "1.86.0-x86_64-pc-windows-msvc",
+            "beta-i686-pc-windows-gnullvm",
+        ] {
+            ToolchainName::from_str(name).unwrap();
+        }
+    }
+}

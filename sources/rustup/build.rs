@@ -1,0 +1,104 @@
+use std::env;
+
+use platforms::Platform;
+
+fn from_build() -> Result<String, String> {
+    let tuple = if let Ok(tuple) = env::var("RUSTUP_OVERRIDE_BUILD_TUPLE") {
+        tuple
+    } else if let Ok(tuple) = env::var("RUSTUP_OVERRIDE_BUILD_TRIPLE") {
+        println!(
+            "cargo:warning=RUSTUP_OVERRIDE_BUILD_TRIPLE is deprecated; use RUSTUP_OVERRIDE_BUILD_TUPLE instead"
+        );
+        tuple
+    } else if let Ok(tuple) = env::var("TARGET") {
+        tuple
+    } else {
+        panic!(
+            "Unable to get target tuple from environment; Be sure that TARGET env var, or its override, is set"
+        )
+    };
+    if Platform::ALL.iter().any(|p| p.target_triple == tuple) {
+        Ok(tuple)
+    } else {
+        Err(tuple)
+    }
+}
+
+fn main() {
+    println!("cargo::rerun-if-env-changed=RUSTUP_OVERRIDE_BUILD_TUPLE");
+    println!("cargo::rerun-if-env-changed=RUSTUP_OVERRIDE_BUILD_TRIPLE");
+    println!("cargo::rerun-if-env-changed=TARGET");
+    match from_build() {
+        Ok(tuple) => eprintln!("Computed build based on target tuple: {tuple:#?}"),
+        Err(s) => {
+            eprintln!("Unable to parse target '{s}' as a known target tuple");
+            eprintln!(
+                "If you are attempting to bootstrap a new target, you might need to update `platforms` to a newer version"
+            );
+            std::process::abort();
+        }
+    }
+    let target = env::var("TARGET").unwrap();
+    println!("cargo::rustc-env=TARGET={target}");
+
+    // Set linker options specific to Windows MSVC.
+    let target_os = env::var("CARGO_CFG_TARGET_OS");
+    let target_env = env::var("CARGO_CFG_TARGET_ENV");
+    if !(target_os.as_deref() == Ok("windows") && target_env.as_deref() == Ok("msvc")) {
+        return;
+    }
+
+    // # Only search system32 for DLLs
+    //
+    // This applies to DLLs loaded at load time. However, this setting is ignored
+    // before Windows 10 RS1 (aka 1601).
+    // https://learn.microsoft.com/en-us/cpp/build/reference/dependentloadflag?view=msvc-170
+    println!("cargo::rustc-link-arg-bin=rustup-init=/DEPENDENTLOADFLAG:0x800");
+
+    // # Delay load
+    //
+    // Delay load dlls that are not "known DLLs"[1].
+    // Known DLLs are always loaded from the system directory whereas other DLLs
+    // are loaded from the application directory. By delay loading the latter
+    // we can ensure they are instead loaded from the system directory.
+    // [1]: https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order#factors-that-affect-searching
+    //
+    // This will work on all supported Windows versions but it relies on
+    // us using `SetDefaultDllDirectories` before any libraries are loaded.
+    // See also: src/bin/rustup-init.rs
+    let delay_load_dlls = ["api-ms-win-core-synch-l1-2-0"];
+    for dll in delay_load_dlls {
+        println!("cargo::rustc-link-arg-bin=rustup-init=/delayload:{dll}.dll");
+    }
+    // Also delay load system DLLs that the proxies never call. Every `cargo`,
+    // `rustc` etc. started through rustup is a separate process on Windows, and
+    // each of these DLLs (with what it pulls in, such as gdi32 for user32) costs
+    // start-up time when it is loaded eagerly.
+    //
+    // Builds with the `test` feature (CI's test runs) skip this: they also link
+    // the binary's empty test and bench harnesses, which don't import these
+    // DLLs, so `/WX` would turn the unused `/delayload` into a link error.
+    if env::var_os("CARGO_FEATURE_TEST").is_none() {
+        let delay_load_for_startup = [
+            "user32", "shell32", "ole32", "oleaut32", "crypt32", "secur32", "ws2_32",
+        ];
+        for dll in delay_load_for_startup {
+            println!("cargo::rustc-link-arg-bin=rustup-init=/delayload:{dll}.dll");
+        }
+    }
+    // When using delayload, it's necessary to also link delayimp.lib
+    // https://learn.microsoft.com/en-us/cpp/build/reference/dependentloadflag?view=msvc-170
+    println!("cargo::rustc-link-arg-bin=rustup-init=delayimp.lib");
+
+    // # Turn linker warnings into errors
+    //
+    // Rust hides linker warnings meaning mistakes may go unnoticed.
+    // Turning them into errors forces them to be displayed (and the build to fail).
+    // If we do want to ignore specific warnings then `/IGNORE:` should be used.
+    println!("cargo::rustc-link-arg-bin=rustup-init=/WX");
+
+    // Increase the stack size to 2 mb.
+    // Works around issue with the clap parser using a lot of stack space in debug mode.
+    // See https://github.com/clap-rs/clap/issues/5134
+    println!("cargo::rustc-link-arg-bin=rustup-init=/STACK:0x200000");
+}

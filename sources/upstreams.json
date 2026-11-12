@@ -238,7 +238,22 @@
       ],
       "imported_at": "2026-11-12T07:31:46.836533+00:00",
       "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
+    },
+    {
+      "upstream_tree": "845df1db1d830ee4ae567c97065a753e08df48f1",
+      "tree": "845df1db1d830ee4ae567c97065a753e08df48f1",
+      "file_count": 288,
+      "submodules": [],
+      "path": "sources/rustup",
+      "url": "https://github.com/rust-lang/rustup.git",
+      "branch": "main",
+      "commit": "eb533398ad655461bad72872276ce5987c33c369",
+      "components": [
+        "rustup"
+      ],
+      "imported_at": "2026-11-12T07:32:50.324987+00:00",
+      "verification": "All upstream file blobs and modes preserved; pinned submodule source trees expanded and verified recursively"
     }
   ],
-  "updated_at": "2026-11-12T07:31:46.836559+00:00"
+  "updated_at": "2026-11-12T07:32:50.325004+00:00"
 }

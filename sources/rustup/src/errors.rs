@@ -1,0 +1,512 @@
+#![allow(clippy::large_enum_variant)]
+
+use std::{
+    borrow::Cow,
+    ffi::OsString,
+    fmt::{self, Debug, Write as FmtWrite},
+    io::{self, Write},
+    path::PathBuf,
+};
+
+use platforms::Platform;
+use strsim::damerau_levenshtein;
+use thiserror::Error as ThisError;
+use url::Url;
+
+use crate::{
+    config::Cfg,
+    dist::{
+        Channel, ChannelToolchainName, TargetTuple,
+        config::Config as DistConfig,
+        manifest::{Component, Manifest},
+    },
+    toolchain::{Toolchain, ToolchainName, ToolchainPath},
+};
+
+pub(crate) const DEFAULT_STABLE_HINT: &str = "help: run 'rustup default stable' to download the latest stable release of Rust and set it as your default toolchain.";
+
+#[derive(Debug, Clone)]
+pub enum TargetSuggestion {
+    Toolchain { name: String, target: TargetTuple },
+    Component(String),
+}
+
+impl TargetSuggestion {
+    pub(crate) fn from_target(
+        desc: &ChannelToolchainName,
+        target: &TargetTuple,
+        component: &Component,
+        config: &DistConfig,
+        manifest: &Manifest,
+        cfg: &Cfg<'_>,
+    ) -> Option<Self> {
+        let Ok(toolchains) = cfg.list_toolchains(true) else {
+            return component_suggestion(desc, component, config, manifest, true)
+                .map(Self::Component);
+        };
+
+        for toolchain_name in toolchains {
+            if let ToolchainName::Channel(toolchain_desc) = &toolchain_name
+                && toolchain_desc == desc
+            {
+                continue;
+            }
+
+            let Ok(toolchain) = Toolchain::new(cfg, toolchain_name.clone().into()) else {
+                continue;
+            };
+            let Ok(installed_targets) = toolchain.installed_targets() else {
+                continue;
+            };
+
+            if installed_targets.contains(target) {
+                return Some(Self::Toolchain {
+                    name: toolchain_name.to_string(),
+                    target: target.clone(),
+                });
+            }
+        }
+
+        component_suggestion(desc, component, config, manifest, true).map(Self::Component)
+    }
+}
+
+impl fmt::Display for TargetSuggestion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Toolchain { name, target } => {
+                write!(f, "\nhelp: try `rustup +{name} target remove {target}`")
+            }
+            Self::Component(name) => write!(f, "\nhelp: did you mean '{name}'?"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ComponentSuggestion {
+    Toolchain { name: String, component: String },
+    Component(String),
+}
+
+impl ComponentSuggestion {
+    pub(crate) fn for_removal(
+        desc: &ChannelToolchainName,
+        component: &Component,
+        config: &DistConfig,
+        manifest: &Manifest,
+        cfg: &Cfg<'_>,
+    ) -> Option<Self> {
+        let Ok(toolchains) = cfg.list_toolchains(true) else {
+            return component_suggestion(desc, component, config, manifest, true)
+                .map(Self::Component);
+        };
+
+        let names = [component.name(), component.wildcard().name()];
+        for toolchain_name in toolchains {
+            if let ToolchainName::Channel(toolchain_desc) = &toolchain_name
+                && toolchain_desc == desc
+            {
+                continue;
+            }
+
+            let Ok(toolchain) = Toolchain::new(cfg, toolchain_name.clone().into()) else {
+                continue;
+            };
+            let Ok(installed_components) = toolchain.installed_components() else {
+                continue;
+            };
+
+            if installed_components
+                .iter()
+                .any(|c| names.iter().any(|n| n == c.name()))
+            {
+                return Some(Self::Toolchain {
+                    name: toolchain_name.to_string(),
+                    component: manifest.short_name(component).to_string(),
+                });
+            }
+        }
+
+        component_suggestion(desc, component, config, manifest, true).map(Self::Component)
+    }
+}
+
+impl fmt::Display for ComponentSuggestion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Toolchain { name, component } => {
+                write!(f, "try `rustup +{name} component remove {component}`")
+            }
+            Self::Component(name) => write!(f, "did you mean '{name}'?"),
+        }
+    }
+}
+
+pub(crate) fn component_suggestion(
+    desc: &ChannelToolchainName,
+    component: &Component,
+    config: &DistConfig,
+    manifest: &Manifest,
+    only_installed: bool,
+) -> Option<String> {
+    // Suggest only for very small differences
+    // High number can result in inaccurate suggestions for short queries e.g. `rls`
+    const MAX_DISTANCE: usize = 3;
+    let Ok(components) = manifest.query_components(desc, config) else {
+        return None;
+    };
+    let components = components
+        .iter()
+        .filter(|c| !only_installed || c.installed)
+        .collect::<Vec<_>>();
+    let short_name_distance = components
+        .iter()
+        .map(|c| {
+            (
+                damerau_levenshtein(&manifest.name(&c.component), &manifest.name(component)),
+                *c,
+            )
+        })
+        .min_by_key(|t| t.0)
+        .expect("There should be always at least one component");
+    let long_name_distance = components
+        .iter()
+        .map(|c| {
+            (
+                damerau_levenshtein(&c.component.name(), &manifest.name(component)),
+                *c,
+            )
+        })
+        .min_by_key(|t| t.0)
+        .expect("There should be always at least one component");
+
+    // Find closer suggestion
+    let (closest_distance, closest_match) = if short_name_distance.0 > long_name_distance.0 {
+        let closest = &long_name_distance.1.component;
+        // Check if only targets differ
+        let name = if closest.short_name() == component.short_name() {
+            closest.target()
+        } else {
+            closest.short_name().to_string()
+        };
+        (long_name_distance.0, name)
+    } else {
+        // Check if only targets differ
+        let name = if manifest.short_name(&short_name_distance.1.component)
+            == manifest.short_name(component)
+        {
+            short_name_distance.1.component.target()
+        } else {
+            manifest
+                .short_name(&short_name_distance.1.component)
+                .to_string()
+        };
+        (short_name_distance.0, name)
+    };
+
+    // If suggestion is too different don't suggest anything
+    (closest_distance <= MAX_DISTANCE).then_some(closest_match)
+}
+
+/// A type erasing thunk for the retry crate to permit use with anyhow. See <https://github.com/dtolnay/anyhow/issues/149>
+#[derive(Debug, ThisError)]
+#[error(transparent)]
+pub struct OperationError(pub anyhow::Error);
+
+#[derive(Debug, Clone)]
+pub struct UnknownComponentInfo {
+    pub name: String,
+    pub description: String,
+    pub suggestion: Option<ComponentSuggestion>,
+}
+
+#[derive(ThisError, Debug)]
+pub enum RustupError {
+    #[error("partially downloaded file may have been damaged and was removed, please try again")]
+    BrokenPartialFile,
+    #[error("partially downloaded file was kept for resumption, please try again")]
+    IncompletePartialFile,
+    #[error("component download failed for {0}")]
+    ComponentDownloadFailed(String),
+    #[error("could not create {name} directory: '{}'", .path.display())]
+    CreatingDirectory { name: &'static str, path: PathBuf },
+    #[error("invalid toolchain name: '{0}'")]
+    InvalidToolchainName(String),
+    #[error("could not create link from '{}' to '{}'", .src.display(), .dest.display())]
+    LinkingFile { src: PathBuf, dest: PathBuf },
+    #[error("Unable to proceed. Could not locate working directory.")]
+    LocatingWorkingDir,
+    #[cfg(not(windows))]
+    #[error("failed to set permissions for '{}'", .p.display())]
+    SettingPermissions { p: PathBuf, source: io::Error },
+    #[error("checksum failed for '{url}', expected: '{expected}', calculated: '{calculated}'")]
+    ChecksumFailed {
+        url: String,
+        expected: String,
+        calculated: String,
+    },
+    #[error("failed to install component: '{name}', detected conflict: '{}'", .path.display())]
+    ComponentConflict { name: String, path: PathBuf },
+    #[error("toolchain '{0}' does not support components")]
+    ComponentsUnsupported(String),
+    #[error("toolchain '{0}' does not support components (v1 manifest)")]
+    ComponentsUnsupportedV1(String),
+    #[error("component manifest for '{0}' is corrupt")]
+    CorruptComponent(String),
+    #[error("could not download file from '{url}' to '{}'", .path.display())]
+    DownloadingFile { url: Url, path: PathBuf },
+    #[error("could not download file from '{url}' to '{}'", .path.display())]
+    DownloadNotExists { url: Url, path: PathBuf },
+    #[error(
+        "missing manifest in toolchain '{0}'\n\
+     help: this may happen if the toolchain installation was interrupted\n\
+     help: try reinstalling or updating the toolchain"
+    )]
+    MissingManifest(ChannelToolchainName),
+    #[error("server sent a broken manifest: missing package for component {0}")]
+    MissingPackageForComponent(String),
+    #[error("could not read {name} directory: '{}'", .path.display())]
+    ReadingDirectory { name: &'static str, path: PathBuf },
+    #[error("could not read {name} file: '{}'", .path.display())]
+    ReadingFile { name: &'static str, path: PathBuf },
+    #[error("could not parse {name} file: '{}'", .path.display())]
+    ParsingFile { name: &'static str, path: PathBuf },
+    #[error("could not remove '{}' directory: '{}'", .name, .path.display())]
+    RemovingDirectory { name: &'static str, path: PathBuf },
+    #[error("could not remove '{name}' file: '{}'", .path.display())]
+    RemovingFile { name: &'static str, path: PathBuf },
+    #[error("could not rename '{name}' file from '{src}' to '{dest}'")]
+    RenamingFile {
+        name: &'static str,
+        src: PathBuf,
+        dest: PathBuf,
+        source: io::Error,
+    },
+    #[error("{}", component_unavailable_msg(.components, .manifest, .toolchain))]
+    RequestedComponentsUnavailable {
+        components: Vec<Component>,
+        manifest: Box<Manifest>,
+        toolchain: String,
+    },
+    #[error("command failed: '{}'", PathBuf::from(.name).display())]
+    RunningCommand { name: OsString },
+    #[error(
+        "toolchain '{toolchain}' may not be able to run on this system\n\
+        note: to build software for that platform, try `rustup target add {target_tuple}` instead\n\
+        note: add the `--force-non-host` flag to install the toolchain anyway"
+    )]
+    ToolchainIncompatible {
+        toolchain: String,
+        target_tuple: TargetTuple,
+    },
+    #[error("toolchain '{0}' is not installable")]
+    ToolchainNotInstallable(String),
+    #[error(
+        "toolchain '{name}' is not installed{}",
+        match name {
+            ToolchainName::Channel(t) => {
+                let t = if *is_active { "" } else { &format!(" {t}") };
+                Cow::Owned(format!(
+                    "\nhelp: run `rustup toolchain install{t}` to install it",
+                ))
+            }
+            ToolchainName::Custom(t) => maybe_suggest_toolchain(t),
+        },
+    )]
+    ToolchainNotInstalled {
+        name: ToolchainName,
+        is_active: bool,
+    },
+    #[error("path '{0}' not found")]
+    PathToolchainNotInstalled(ToolchainPath),
+    #[error(
+        "rustup could not choose a version of {0} to run, because one wasn't specified explicitly, and no default is configured.\n{hint}",
+        hint = DEFAULT_STABLE_HINT
+    )]
+    ToolchainNotSelected(String),
+    #[error("{}", unknown_components_msg(.desc, .components))]
+    UnknownComponents {
+        desc: ChannelToolchainName,
+        components: Vec<UnknownComponentInfo>,
+    },
+    #[error(
+        "toolchain '{desc}' has no prebuilt artifacts available for target '{platform}'\n\
+        note: this may happen to a low-tier target as per https://doc.rust-lang.org/nightly/rustc/platform-support.html\n\
+        note: you can find instructions on that page to build the target support from source"
+    )]
+    UnavailableTarget {
+        desc: ChannelToolchainName,
+        platform: &'static Platform,
+    },
+    #[error("toolchain '{}' does not support target '{}'{}\n\
+    note: you can see a list of supported targets with `rustc --print=target-list`\n\
+    note: if you are adding support for a new target to rustc itself, see https://rustc-dev-guide.rust-lang.org/building/new-target.html", .desc, .target,
+    suggest_message(.suggestion))]
+    UnknownTarget {
+        desc: Box<ChannelToolchainName>,
+        target: TargetTuple,
+        suggestion: Option<String>,
+    },
+    #[error("toolchain '{}' does not have target '{}' installed{}", .desc, .target,
+    .suggestion.as_ref().map_or_else(String::new, ToString::to_string))]
+    TargetNotInstalled {
+        desc: Box<ChannelToolchainName>,
+        target: TargetTuple,
+        suggestion: Option<TargetSuggestion>,
+    },
+    #[error(
+        "rustup executable proxies don't seem to work\n\
+        help: this might be a bug in rustup, please open a new issue here:\n\
+        help: https://github.com/rust-lang/rustup/issues/new"
+    )]
+    BrokenProxy,
+    #[error("unknown metadata version: '{0}'")]
+    UnknownMetadataVersion(String),
+    #[error("manifest version '{0}' is not supported")]
+    UnsupportedVersion(String),
+    #[error("could not write {name} file: '{}'", .path.display())]
+    WritingFile { name: &'static str, path: PathBuf },
+    #[error("I/O Error")]
+    IOError(#[from] io::Error),
+}
+
+fn suggest_message(suggestion: &Option<String>) -> String {
+    if let Some(suggestion) = suggestion {
+        format!("; did you mean '{suggestion}'?")
+    } else {
+        String::new()
+    }
+}
+
+fn maybe_suggest_toolchain(bad_name: &str) -> Cow<'static, str> {
+    if bad_name.bytes().all(|b| b".0123456789".contains(&b)) {
+        return Cow::Borrowed("\nhelp: official versioned channels take the form X.Y or X.Y.Z");
+    }
+
+    // Suggest only for very small differences
+    // High number can result in inaccurate suggestions for short queries e.g. `rls`
+    const MAX_DISTANCE: usize = 3;
+
+    let bad_name = &bad_name.to_lowercase();
+    let suggestion = ["stable", "beta", "nightly"]
+        .into_iter()
+        .filter_map(|s| {
+            let distance = damerau_levenshtein(bad_name, s);
+            (distance <= MAX_DISTANCE).then_some((distance, s))
+        })
+        .max();
+
+    match suggestion {
+        Some((_, s)) => Cow::Owned(format!("\nhelp: did you mean '{s}'?")),
+        None => Cow::Borrowed("\nhelp: maybe you have mistyped the toolchain name?"),
+    }
+}
+
+pub(crate) const NIGHTLY_COMPONENT_NOTE: &str =
+    "note: sometimes not all components are available in any given nightly";
+
+/// Returns a error message indicating that certain [`Component`]s are unavailable.
+///
+/// See also [`components_missing_msg`](../dist/dist/fn.components_missing_msg.html)
+/// which generates error messages for component unavailability toolchain-wide operations.
+///
+/// # Panics
+/// This function will panic when the collection of unavailable components `cs` is empty.
+fn component_unavailable_msg(cs: &[Component], manifest: &Manifest, toolchain: &str) -> String {
+    let mut buf = vec![];
+    match cs {
+        [] => panic!(
+            "`component_unavailable_msg` should not be called with an empty collection of unavailable components"
+        ),
+        [c] => {
+            let _ = writeln!(
+                buf,
+                "component {} is unavailable for download for channel '{}'",
+                manifest.description(c),
+                toolchain,
+            );
+
+            if toolchain.starts_with("nightly") {
+                let _ = write!(buf, "{NIGHTLY_COMPONENT_NOTE}");
+            }
+        }
+        cs => {
+            // More than one component
+            let same_target = cs
+                .iter()
+                .all(|c| c.target == cs[0].target || c.target.is_none());
+
+            let cs_str = if same_target {
+                cs.iter()
+                    .map(|c| format!("'{}'", manifest.short_name(c)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                cs.iter()
+                    .map(|c| manifest.description(c))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+
+            let _ = writeln!(
+                buf,
+                "some components are unavailable for download for channel '{toolchain}': {cs_str}",
+            );
+
+            if toolchain.starts_with("nightly") {
+                let _ = write!(buf, "{NIGHTLY_COMPONENT_NOTE}");
+            }
+        }
+    }
+
+    String::from_utf8(buf).unwrap()
+}
+
+fn unknown_components_msg(
+    desc: &ChannelToolchainName,
+    components: &[UnknownComponentInfo],
+) -> String {
+    let mut buf = String::new();
+
+    match components {
+        [] => panic!("`unknown_components_msg` should not be called with an empty collection"),
+        [component] => {
+            let _ = write!(
+                buf,
+                "toolchain '{desc}' does not contain component {}",
+                component.description,
+            );
+
+            if let Some(suggestion) = &component.suggestion {
+                let _ = write!(buf, "\nhelp: {suggestion}");
+            }
+
+            if component.description.contains("rust-std") {
+                let _ = write!(
+                    buf,
+                    "\nnote: not all platforms have the standard library pre-compiled: https://doc.rust-lang.org/nightly/rustc/platform-support.html"
+                );
+
+                if desc.channel == Channel::Nightly {
+                    let _ = write!(
+                        buf,
+                        "\nhelp: consider using `cargo build -Z build-std` instead"
+                    );
+                }
+            }
+        }
+        components => {
+            let _ = writeln!(buf, "toolchain '{desc}' does not contain these components:");
+
+            for component in components {
+                let _ = writeln!(buf, "  - '{}'", component.name);
+
+                if let Some(suggestion) = &component.suggestion {
+                    let _ = writeln!(buf, "    help: {suggestion}");
+                }
+            }
+        }
+    }
+
+    buf
+}

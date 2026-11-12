@@ -1,0 +1,604 @@
+//! Just a dumping ground for cli stuff
+
+use std::{
+    cmp, env,
+    fmt::Display,
+    fs,
+    io::{BufRead, Write},
+    path::Path,
+    sync::LazyLock,
+};
+
+use anstyle::Style;
+use anyhow::{Context, anyhow};
+use clap_cargo::style::{CONTEXT, ERROR, UPDATE_ADDED, UPDATE_UNCHANGED, UPDATE_UPGRADED};
+use futures_util::future::join_all;
+use git_testament::{git_testament, render_testament};
+use tracing::{error, info, warn};
+use tracing_subscriber::{EnvFilter, Registry, reload::Handle};
+
+use crate::{
+    config::Cfg,
+    dist::{ChannelToolchainName, DistOptions, TargetTuple},
+    errors::RustupError,
+    install::{InstallMethod, UpdateStatus},
+    process::Process,
+    toolchain::{Toolchain, ToolchainName, ToolchainNameOrPath},
+    utils::{self, ExitCode},
+};
+
+pub(crate) const WARN_COMPLETE_PROFILE: &str = "\
+downloading with the `complete` profile is deprecated
+help: consider switching to the `default` profile with `rustup set profile default`";
+
+pub(crate) fn confirm(question: &str, default: bool, process: &Process) -> anyhow::Result<bool> {
+    write!(process.stdout().lock(), "{question} ")?;
+    let _ = std::io::stdout().flush();
+    let input = read_line(process)?;
+
+    let r = match &*input.to_lowercase() {
+        "y" | "yes" => true,
+        "n" | "no" => false,
+        "" => default,
+        _ => false,
+    };
+
+    writeln!(process.stdout().lock())?;
+
+    Ok(r)
+}
+
+pub(crate) enum Confirm {
+    Yes,
+    No,
+    Advanced,
+}
+
+pub(crate) fn confirm_advanced(
+    customized_install: bool,
+    process: &Process,
+) -> anyhow::Result<Confirm> {
+    writeln!(process.stdout().lock())?;
+    let first_option = match customized_install {
+        true => "1) Proceed with selected options (default - just press enter)",
+        false => "1) Proceed with standard installation (default - just press enter)",
+    };
+    writeln!(process.stdout().lock(), "{first_option}")?;
+    writeln!(process.stdout().lock(), "2) Customize installation")?;
+    writeln!(process.stdout().lock(), "3) Cancel installation")?;
+    write!(process.stdout().lock(), ">")?;
+
+    let _ = std::io::stdout().flush();
+    let input = read_line(process)?;
+
+    let r = match &*input {
+        "1" | "" => Confirm::Yes,
+        "2" => Confirm::Advanced,
+        _ => Confirm::No,
+    };
+
+    writeln!(process.stdout().lock())?;
+
+    Ok(r)
+}
+
+pub(crate) fn question_str(
+    question: &str,
+    default: &str,
+    process: &Process,
+) -> anyhow::Result<String> {
+    writeln!(process.stdout().lock(), "{question} [{default}]")?;
+    let _ = std::io::stdout().flush();
+    let input = read_line(process)?;
+
+    writeln!(process.stdout().lock())?;
+
+    if input.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(input)
+    }
+}
+
+pub(crate) fn question_bool(
+    question: &str,
+    default: bool,
+    process: &Process,
+) -> anyhow::Result<bool> {
+    let default_text = if default { "(Y/n)" } else { "(y/N)" };
+    writeln!(process.stdout().lock(), "{question} {default_text}")?;
+
+    let _ = std::io::stdout().flush();
+    let input = read_line(process)?;
+
+    writeln!(process.stdout().lock())?;
+
+    if input.is_empty() {
+        Ok(default)
+    } else {
+        match &*input.to_lowercase() {
+            "y" | "yes" => Ok(true),
+            "n" | "no" => Ok(false),
+            _ => Ok(default),
+        }
+    }
+}
+
+pub(crate) fn read_line(process: &Process) -> anyhow::Result<String> {
+    let stdin = process.stdin();
+    let stdin = stdin.lock();
+    let mut lines = stdin.lines();
+    let lines = lines.next().transpose()?;
+    match lines {
+        None => Err(anyhow!("no lines found from stdin")),
+        Some(v) => Ok(v),
+    }
+    .context("unable to read from stdin for confirmation")
+}
+
+pub(crate) fn show_channel_update(
+    cfg: &Cfg<'_>,
+    name: PackageUpdate,
+    updated: anyhow::Result<UpdateStatus>,
+) -> anyhow::Result<()> {
+    show_channel_updates(cfg, vec![(name, updated)])
+}
+
+pub(crate) enum PackageUpdate {
+    Rustup,
+    Toolchain(ChannelToolchainName),
+}
+
+impl Display for PackageUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rustup => write!(f, "rustup"),
+            Self::Toolchain(t) => write!(f, "{t}"),
+        }
+    }
+}
+
+fn show_channel_updates(
+    cfg: &Cfg<'_>,
+    updates: Vec<(PackageUpdate, anyhow::Result<UpdateStatus>)>,
+) -> anyhow::Result<()> {
+    let data = updates.into_iter().map(|(pkg, result)| {
+        let (banner, style) = match &result {
+            Ok(UpdateStatus::Installed) => ("installed", UPDATE_ADDED),
+            Ok(UpdateStatus::Updated(_)) => ("updated", UPDATE_UPGRADED),
+            Ok(UpdateStatus::Unchanged) => ("unchanged", UPDATE_UNCHANGED),
+            Err(_) => ("update failed", ERROR),
+        };
+
+        let (previous_version, version) = match &pkg {
+            PackageUpdate::Rustup => {
+                let previous_version: Option<String> = match result {
+                    Ok(UpdateStatus::Installed) | Ok(UpdateStatus::Unchanged) | Err(_) => None,
+                    _ => Some(env!("CARGO_PKG_VERSION").into()),
+                };
+                let version = match result {
+                    Err(_) | Ok(UpdateStatus::Installed) | Ok(UpdateStatus::Unchanged) => {
+                        env!("CARGO_PKG_VERSION").into()
+                    }
+                    Ok(UpdateStatus::Updated(v)) => v,
+                };
+                (previous_version, version)
+            }
+            PackageUpdate::Toolchain(name) => {
+                // this is a bit strange: we don't supply the version we
+                // presumably had (for Installed and Unchanged), so we query it
+                // again. Perhaps we can do better.
+                let version = match Toolchain::new(cfg, name.clone().into()) {
+                    Ok(t) => t.rustc_version(),
+                    Err(_) => String::from("(toolchain not installed)"),
+                };
+                let previous_version: Option<String> = match result {
+                    Ok(UpdateStatus::Installed) | Ok(UpdateStatus::Unchanged) | Err(_) => None,
+                    Ok(UpdateStatus::Updated(v)) => Some(v),
+                };
+                (previous_version, version)
+            }
+        };
+
+        let width = pkg.to_string().len() + 1 + banner.len();
+
+        Ok((pkg, banner, width, style, version, previous_version))
+    });
+
+    let t = cfg.process.stdout();
+    let mut t = t.lock();
+
+    let data = data.collect::<anyhow::Result<Vec<_>>>()?;
+    let max_width = data
+        .iter()
+        .fold(0, |a, &(_, _, width, _, _, _)| cmp::max(a, width));
+
+    for (pkg, banner, width, style, version, previous_version) in data {
+        let padding = max_width - width;
+        let padding: String = " ".repeat(padding);
+        let _ = write!(t, "  {padding}{style}{pkg} {banner}{style:#} - {version}");
+        if let Some(previous_version) = previous_version {
+            let _ = write!(t, " (from {previous_version})");
+        }
+        let _ = writeln!(t);
+    }
+    let _ = writeln!(t);
+
+    Ok(())
+}
+
+pub(crate) async fn update_all_channels(
+    cfg: &Cfg<'_>,
+    force_update: bool,
+    check: bool,
+) -> anyhow::Result<ExitCode> {
+    let profile = cfg.get_profile()?;
+    let channels = cfg.list_tracking_channels()?;
+
+    // Run a pre-check to determine which channels have updates available.
+    let channels_with_manifests = join_all(channels.into_iter().map(|d| async move {
+        // Prefetch errors are intentionally discarded; a failed prefetch falls
+        // back to the normal update path, where errors are properly propagated.
+        let manifest = d.fetch_dist_manifest().await.unwrap_or(None);
+        (d, manifest)
+    }))
+    .await;
+
+    let mut toolchains = Vec::with_capacity(channels_with_manifests.len());
+    let mut has_update_error = false;
+    let mut has_update = false;
+    for (distributable, manifest) in channels_with_manifests {
+        let desc = distributable.desc();
+        let result = if force_update || manifest.is_some() {
+            let options = DistOptions::new(&[], &[], desc, profile, force_update, cfg)?
+                .for_update(&distributable, false);
+            InstallMethod::Dist(options).install(manifest).await
+        } else {
+            Ok(UpdateStatus::Unchanged)
+        };
+
+        match &result {
+            Ok(UpdateStatus::Updated(_)) | Ok(UpdateStatus::Installed) => has_update = true,
+            Err(e) => {
+                has_update_error = true;
+                report_error(e, cfg.process);
+            }
+            _ => (),
+        }
+
+        toolchains.push((desc.clone(), result));
+    }
+
+    let exit_code = if has_update_error {
+        ExitCode::FAILURE
+    } else if check && has_update {
+        ExitCode::UPDATES_AVAILABLE
+    } else {
+        ExitCode::SUCCESS
+    };
+
+    if toolchains.is_empty() {
+        info!("no updatable toolchains installed");
+    }
+
+    if !toolchains.is_empty() {
+        writeln!(cfg.process.stdout().lock())?;
+
+        let t = toolchains
+            .into_iter()
+            .map(|(p, s)| (PackageUpdate::Toolchain(p), s))
+            .collect();
+        show_channel_updates(cfg, t)?;
+    }
+
+    Ok(exit_code)
+}
+
+/// Print a list of items (targets or components) to stdout.
+///
+/// `items` represents the list of items, with the name and a boolean
+/// to represent whether the item is currently installed.
+pub(super) fn list_items(
+    items: impl Iterator<Item = (impl Display, bool)>,
+    installed_only: bool,
+    quiet: bool,
+    process: &Process,
+) -> anyhow::Result<ExitCode> {
+    let t = process.stdout();
+    let mut t = t.lock();
+    let bold = Style::new().bold();
+    for (name, installed) in items {
+        if installed && !installed_only && !quiet {
+            writeln!(t, "{bold}{name}{bold:#} {CONTEXT}(installed){CONTEXT:#}")?;
+        } else if installed || !installed_only {
+            writeln!(t, "{name}")?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub(crate) async fn list_toolchains(
+    cfg: &Cfg<'_>,
+    verbose: bool,
+    quiet: bool,
+) -> anyhow::Result<ExitCode> {
+    let mut toolchains = cfg.list_toolchains(quiet)?;
+    if toolchains.is_empty() {
+        info!("no installed toolchains");
+    } else {
+        let default_toolchain_name = cfg.get_default()?;
+        let active_toolchain_name: Option<ToolchainName> =
+            if let Ok(Some((ToolchainNameOrPath::Named(toolchain), _source))) =
+                cfg.maybe_ensure_active_toolchain(None).await
+            {
+                Some(toolchain)
+            } else {
+                None
+            };
+
+        toolchains.sort();
+        for toolchain in toolchains {
+            let is_default_toolchain = default_toolchain_name.as_ref() == Some(&toolchain);
+            let is_active_toolchain = active_toolchain_name.as_ref() == Some(&toolchain);
+
+            print_toolchain(
+                cfg,
+                &toolchain.to_string(),
+                is_default_toolchain,
+                is_active_toolchain,
+                verbose,
+                quiet,
+            )
+            .context("Failed to list toolchains' directories")?;
+        }
+    }
+
+    fn print_toolchain(
+        cfg: &Cfg<'_>,
+        toolchain: &str,
+        is_default: bool,
+        is_active: bool,
+        verbose: bool,
+        quiet: bool,
+    ) -> anyhow::Result<()> {
+        if quiet {
+            writeln!(cfg.process.stdout().lock(), "{toolchain}")?;
+            return Ok(());
+        }
+
+        let status_str = match (is_default, is_active) {
+            (true, true) => " (active, default)",
+            (true, false) => " (default)",
+            (false, true) => " (active)",
+            (false, false) => "",
+        };
+
+        let toolchain_path = cfg.toolchains_dir.join(toolchain);
+        let toolchain_meta = fs::symlink_metadata(&toolchain_path)?;
+        let toolchain_path = if verbose {
+            if toolchain_meta.is_dir() {
+                format!(" {}", toolchain_path.display())
+            } else {
+                format!(" {}", fs::read_link(toolchain_path)?.display())
+            }
+        } else {
+            String::new()
+        };
+
+        writeln!(
+            cfg.process.stdout().lock(),
+            "{toolchain}{CONTEXT}{status_str}{CONTEXT:#}{toolchain_path}",
+        )?;
+        Ok(())
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+pub(crate) fn list_overrides(cfg: &Cfg<'_>) -> anyhow::Result<ExitCode> {
+    let overrides = cfg.settings_file.with(|s| Ok(s.overrides.clone()))?;
+
+    if overrides.is_empty() {
+        writeln!(cfg.process.stdout().lock(), "no overrides")?;
+    } else {
+        let mut any_not_exist = false;
+        for (k, v) in overrides {
+            let dir_exists = Path::new(&k).is_dir();
+            if !dir_exists {
+                any_not_exist = true;
+            }
+            writeln!(
+                cfg.process.stdout().lock(),
+                "{:<40}\t{:<20}",
+                utils::format_path_for_display(&k)
+                    + if dir_exists { "" } else { " (not a directory)" },
+                v
+            )?
+        }
+        if any_not_exist {
+            writeln!(cfg.process.stdout().lock())?;
+            info!(
+                "you may remove overrides for non-existent directories with
+`rustup override unset --nonexistent`"
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+git_testament!(TESTAMENT);
+
+pub(crate) fn version() -> &'static str {
+    // Because we trust our `stable` branch given the careful release
+    // process, we mark it trusted here so that our version numbers look
+    // right when built from CI before the tag is pushed
+    static RENDERED: LazyLock<String> = LazyLock::new(|| render_testament!(TESTAMENT, "stable"));
+    &RENDERED
+}
+
+pub(crate) fn dump_testament(process: &Process) -> anyhow::Result<ExitCode> {
+    use git_testament::GitModification::*;
+    writeln!(
+        process.stdout().lock(),
+        "Rustup version renders as: {}",
+        version()
+    )?;
+    writeln!(
+        process.stdout().lock(),
+        "Current crate version: {}",
+        env!("CARGO_PKG_VERSION")
+    )?;
+    if TESTAMENT.branch_name.is_some() {
+        writeln!(
+            process.stdout().lock(),
+            "Built from branch: {}",
+            TESTAMENT.branch_name.unwrap()
+        )?;
+    } else {
+        writeln!(process.stdout().lock(), "Branch information missing")?;
+    }
+    writeln!(process.stdout().lock(), "Commit info: {}", TESTAMENT.commit)?;
+    if TESTAMENT.modifications.is_empty() {
+        writeln!(process.stdout().lock(), "Working tree is clean")?;
+    } else {
+        for fmod in TESTAMENT.modifications {
+            match fmod {
+                Added(f) => writeln!(
+                    process.stdout().lock(),
+                    "Added: {}",
+                    String::from_utf8_lossy(f)
+                )?,
+                Removed(f) => writeln!(
+                    process.stdout().lock(),
+                    "Removed: {}",
+                    String::from_utf8_lossy(f)
+                )?,
+                Modified(f) => writeln!(
+                    process.stdout().lock(),
+                    "Modified: {}",
+                    String::from_utf8_lossy(f)
+                )?,
+                Untracked(f) => writeln!(
+                    process.stdout().lock(),
+                    "Untracked: {}",
+                    String::from_utf8_lossy(f)
+                )?,
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn show_backtrace(process: &Process) -> bool {
+    if let Ok(true) = process.var("RUSTUP_NO_BACKTRACE").map(|s| s == "1") {
+        return false;
+    }
+
+    if let Ok(true) = process.var("RUST_BACKTRACE").map(|s| s == "1") {
+        return true;
+    }
+
+    for arg in process.args() {
+        if arg == "-v" || arg == "--verbose" {
+            return true;
+        }
+    }
+
+    false
+}
+
+pub fn report_error(e: &anyhow::Error, process: &Process) {
+    // NB: This shows one error: even for multiple causes and backtraces etc,
+    // rather than one per cause, and one for the backtrace. This seems like a
+    // reasonable tradeoff, but if we want to do differently, this is the code
+    // hunk to revisit, that and a similar build.rs auto-detect glue as anyhow
+    // has to detect when backtrace is available.
+    if show_backtrace(process) {
+        error!("{:?}", e);
+    } else {
+        error!("{:#}", e);
+    }
+}
+
+pub(crate) fn ignorable_error(
+    error: &'static str,
+    no_prompt: bool,
+    process: &Process,
+) -> anyhow::Result<()> {
+    let error = anyhow!(error);
+    report_error(&error, process);
+    if no_prompt {
+        warn!("continuing (because the -y flag is set and the error is ignorable)");
+        Ok(())
+    } else if confirm("\nContinue? (y/N)", false, process).unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+/// Returns an error for a toolchain if both conditions are met:
+/// - The toolchain has an incompatible target tuple,
+///   i.e. it might not be able to run on the host system.
+/// - The `force_non_host` flag is set to `false`.
+pub(crate) fn check_non_host_toolchain(
+    toolchain: String,
+    host_arch: &TargetTuple,
+    target_tuple: &TargetTuple,
+    force_non_host: bool,
+) -> anyhow::Result<()> {
+    if force_non_host || host_arch.can_run(target_tuple)? {
+        return Ok(());
+    }
+    Err(RustupError::ToolchainIncompatible {
+        toolchain,
+        target_tuple: target_tuple.clone(),
+    }
+    .into())
+}
+
+/// Warns if rustup is running under emulation, such as macOS Rosetta
+pub(crate) fn warn_if_host_is_emulated(process: &Process) {
+    // In rustup's own CI, we wouldn't want host emulation warnings to mess up the
+    // end-to-end test results.
+    if process.var("RUSTUP_CI").is_ok() {
+        return;
+    }
+    if TargetTuple::is_host_emulated() {
+        warn!(
+            "Rustup is not running natively. It's running under emulation of {}.",
+            TargetTuple::from_host_or_build(process)
+        );
+        warn!(
+            "For best compatibility and performance you should reinstall rustup for your native CPU."
+        );
+    }
+}
+
+/// Updates the console logger level according to whether `quiet` or `verbose` is set to `true`.
+///
+/// Does nothing if at least one of the following conditions is met:
+/// - The `RUSTUP_LOG` environment variable is set.
+/// - Both `quiet` and `verbose` are set to `true`.
+pub(super) fn update_console_filter(
+    process: &Process,
+    filter: &Handle<EnvFilter, Registry>,
+    quiet: bool,
+    verbose: bool,
+) {
+    if process.var("RUSTUP_LOG").is_ok() {
+        return;
+    }
+
+    let maybe_directives = match (quiet, verbose) {
+        (true, _) => Some("rustup=WARN"),
+        (_, true) => Some("rustup=DEBUG"),
+        (_, _) => None,
+    };
+
+    if let Some(directives) = maybe_directives {
+        filter
+            .modify(|it| *it = EnvFilter::new(directives))
+            .expect("error reloading `EnvFilter` for console_logger");
+    }
+}

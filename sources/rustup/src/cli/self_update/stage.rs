@@ -1,0 +1,545 @@
+use std::{
+    env::consts::EXE_SUFFIX,
+    fs::{self, File, OpenOptions},
+    io,
+    ops::Deref,
+    path::{Path, PathBuf},
+    process::{Child, Command},
+    time::{Duration, SystemTime},
+};
+
+use anyhow::Context;
+use tracing::warn;
+
+use super::install_proxies_with_opts;
+use crate::{process::Process, utils};
+
+/// The managed updater path, held together with the lock that protects it.
+pub(super) struct PreparedUpdater {
+    path: PathBuf,
+    _lock: SelfUpdateLock,
+}
+
+impl PreparedUpdater {
+    /// Starts the updater in `--self-replace` mode and then releases the lock.
+    ///
+    /// The lock must be held until the child has been spawned: a concurrent
+    /// self-update could otherwise replace the updater before it is executed.
+    pub(super) fn spawn_replacer(self) -> anyhow::Result<Child> {
+        let stage = self
+            .path
+            .parent()
+            .context("self-updater path has no parent directory")?;
+        let mut command = Command::new(&self.path);
+        command.env(STAGE_ENV, stage).arg("--self-replace");
+        let child = cfg_select! {
+            windows => super::windows::spawn_with_parent_handle(&mut command),
+            unix => command.spawn(),
+        };
+        child.with_context(|| format!("unable to run updater ({})", self.path.display()))
+    }
+}
+
+impl TryFrom<SelfUpdateLock> for PreparedUpdater {
+    type Error = anyhow::Error;
+
+    fn try_from(lock: SelfUpdateLock) -> Result<Self, Self::Error> {
+        let path = updater_path(&lock.directory);
+        utils::ensure_file_removed("self-updater", &path)?;
+        for marker in [Marker::Complete, Marker::Failed] {
+            utils::ensure_file_removed("self-update status marker", &marker.path(&lock.directory))?;
+        }
+        Ok(Self { path, _lock: lock })
+    }
+}
+
+impl Deref for PreparedUpdater {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Exclusive right to download the updater or replace the installed rustup.
+pub(super) struct SelfUpdateLock {
+    directory: PathBuf,
+    _file: File,
+}
+
+impl SelfUpdateLock {
+    pub(super) fn lock(process: &Process) -> anyhow::Result<Self> {
+        let lock = Self::open(process)?;
+        utils::raw::lock(&lock._file).context("failed to lock self-update")?;
+        Ok(lock)
+    }
+
+    fn try_lock(process: &Process) -> anyhow::Result<Option<Self>> {
+        let lock = Self::open(process)?;
+        match utils::raw::try_lock(&lock._file) {
+            Ok(()) => Ok(Some(lock)),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(error).context("failed to lock self-update"),
+        }
+    }
+
+    fn open(process: &Process) -> anyhow::Result<Self> {
+        let directory = stage_root(process)?;
+        utils::ensure_dir_exists("self-update", &directory)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            // The file exists only to be locked; never touch its contents.
+            .truncate(false)
+            .open(directory.join(SELF_UPDATE_LOCK_FILE))
+            .context("failed to open self-update lock")?;
+
+        Ok(Self {
+            directory,
+            _file: file,
+        })
+    }
+
+    /// Installs the running executable as `rustup` in `bin_path` and refreshes its proxies.
+    pub(super) fn install_bins(
+        &self,
+        bin_path: &Path,
+        force_hard_links: bool,
+    ) -> anyhow::Result<()> {
+        self.install_bins_from(&utils::current_exe()?, bin_path, force_hard_links)
+    }
+
+    fn install_bins_from(
+        &self,
+        this_exe_path: &Path,
+        bin_path: &Path,
+        force_hard_links: bool,
+    ) -> anyhow::Result<()> {
+        let rustup_path = bin_path.join(format!("rustup{EXE_SUFFIX}"));
+        utils::ensure_dir_exists("bin", bin_path)?;
+
+        // Stage the new binary as a sibling of the installed one, so that
+        // publishing it below is a rename within a single directory.
+        let pending = tempfile::Builder::new()
+            .prefix(PENDING_BINARY_PREFIX)
+            .tempfile_in(bin_path)
+            .context("failed to reserve a pending rustup binary")?
+            .into_temp_path();
+
+        // TempPath reserves a unique name, but preserving a source symlink requires
+        // an absent destination rather than an existing empty file.
+        fs::remove_file(&pending).context("failed to prepare the pending rustup path")?;
+        utils::copy_file_symlink_to_source(this_exe_path, &pending)?;
+        utils::make_executable(&pending)?;
+        if !fs::symlink_metadata(&pending)?.file_type().is_symlink() {
+            OpenOptions::new()
+                .write(true)
+                .open(&pending)
+                .and_then(|file| file.sync_all())
+                .context("failed to sync the pending rustup binary")?;
+        }
+
+        replace_rustup_binary(&pending, &rustup_path)?;
+        install_proxies_with_opts(bin_path, force_hard_links)
+    }
+}
+
+pub(super) fn mark_result(succeeded: bool, process: &Process) {
+    let Some(stage) = process.var_os(STAGE_ENV).map(PathBuf::from) else {
+        return;
+    };
+    let marker = if succeeded {
+        Marker::Complete
+    } else {
+        Marker::Failed
+    };
+    if let Err(error) = marker.record(process, &stage) {
+        warn!("could not record self-update result: {error}");
+    }
+}
+
+pub(super) fn cleanup(process: &Process, bin_path: &Path) -> anyhow::Result<()> {
+    cleanup_at(process, bin_path, SystemTime::now())
+}
+
+fn replace_rustup_binary(replacement: &Path, rustup: &Path) -> anyhow::Result<()> {
+    // `rename` replaces an existing destination in one step on every platform,
+    // so a failure here leaves the installed rustup untouched. The copy fallback
+    // is disabled because it would break that guarantee; it is never needed,
+    // since the replacement lives in the same directory as the target.
+    utils::rename("rustup", replacement, rustup, false)?;
+    // Make the rename durable. Windows has no directory handle to sync.
+    #[cfg(unix)]
+    File::open(
+        rustup
+            .parent()
+            .context("installed rustup binary has no parent directory")?,
+    )
+    .and_then(|directory| directory.sync_all())
+    .context("failed to sync rustup binary directory")?;
+
+    Ok(())
+}
+
+fn cleanup_at(process: &Process, bin_path: &Path, now: SystemTime) -> anyhow::Result<()> {
+    if let Some(lock) = SelfUpdateLock::try_lock(process)? {
+        let updater = updater_path(&lock.directory);
+        // The replacer records an outcome only once it has finished. An unmarked
+        // updater may still be about to run, or its replacer may have died before
+        // recording anything; only its age tells those two cases apart.
+        let markers = [Marker::Complete, Marker::Failed];
+        let finished = markers
+            .iter()
+            .any(|marker| marker.path(&lock.directory).is_file());
+        if (finished || is_stale(&updater, now))
+            && utils::remove_file_best_effort("self-updater", &updater)
+        {
+            for marker in markers {
+                utils::remove_file_best_effort(
+                    "self-update status marker",
+                    &marker.path(&lock.directory),
+                );
+            }
+        }
+    }
+
+    match fs::read_dir(bin_path) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(PENDING_BINARY_PREFIX)
+                    && is_stale(&path, now)
+                {
+                    utils::remove_file_best_effort("pending rustup binary", &path);
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warn!(
+                "could not inspect pending rustup binaries in {}: {error}",
+                bin_path.display()
+            );
+        }
+    }
+
+    let updater = bin_path.join(format!("rustup-init{EXE_SUFFIX}"));
+    // Legacy updaters have no result marker, and an older rustup process may
+    // still own the shared path.
+    if is_stale(&updater, now) {
+        utils::remove_file_best_effort("legacy self-updater", &updater);
+    }
+
+    Ok(())
+}
+
+fn is_stale(path: &Path, now: SystemTime) -> bool {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| age >= ABANDONED_UPDATE_AGE)
+}
+
+/// Outcome recorded next to the managed updater once replacement has finished.
+#[derive(Clone, Copy)]
+pub enum Marker {
+    Complete,
+    Failed,
+}
+
+impl Marker {
+    /// Records this outcome in `stage`, ignoring stages outside the managed directory.
+    fn record(self, process: &Process, stage: &Path) -> anyhow::Result<()> {
+        if stage != stage_root(process)? {
+            warn!(
+                "ignoring self-update stage outside the managed directory: {}",
+                stage.display()
+            );
+            return Ok(());
+        }
+
+        utils::write_file("self-update status marker", &self.path(stage), "")
+    }
+
+    pub fn path(self, stage: &Path) -> PathBuf {
+        stage.join(match self {
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+        })
+    }
+}
+
+/// The managed updater inside the `stage` directory.
+pub fn updater_path(stage: &Path) -> PathBuf {
+    stage.join(format!("rustup-init{EXE_SUFFIX}"))
+}
+
+fn stage_root(process: &Process) -> anyhow::Result<PathBuf> {
+    Ok(process.rustup_home()?.join(SELF_UPDATE_DIRECTORY))
+}
+
+pub const SELF_UPDATE_DIRECTORY: &str = "self-update";
+const SELF_UPDATE_LOCK_FILE: &str = "self-update.lock";
+const STAGE_ENV: &str = "RUSTUP_SELF_UPDATE_STAGE";
+const PENDING_BINARY_PREFIX: &str = ".rustup-pending-";
+const ABANDONED_UPDATE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::{
+        process::TestProcess,
+        test::{Env, test_dir},
+    };
+
+    #[tokio::test]
+    async fn updater_path_is_stable() {
+        let root = test_dir().unwrap();
+        let process = test_process(root.path());
+        let first = SelfUpdateLock::lock(&process.process).unwrap();
+        let first_path = updater_path(&first.directory);
+        let stage = first.directory.clone();
+        fs::write(&first_path, "").unwrap();
+        fs::write(Marker::Complete.path(&stage), "").unwrap();
+        drop(first);
+        let second = prepared_updater(&process);
+
+        assert_eq!(first_path, *second);
+        assert!(!Marker::Complete.path(&stage).exists());
+    }
+
+    #[tokio::test]
+    async fn self_update_lock_is_global() {
+        let root = test_dir().unwrap();
+        let process = test_process(root.path());
+        let lock = SelfUpdateLock::lock(&process.process).unwrap();
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(
+                stage_root(&process.process)
+                    .unwrap()
+                    .join(SELF_UPDATE_LOCK_FILE),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            utils::raw::try_lock(&contender),
+            Err(fs::TryLockError::WouldBlock)
+        ));
+        drop(lock);
+        utils::raw::try_lock(&contender).unwrap();
+    }
+
+    #[tokio::test]
+    async fn install_bins_preserves_existing_rustup_if_source_disappears() {
+        let root = test_dir().unwrap();
+        let process = test_process(root.path());
+        let rustup = root.path().join(format!("cargo/bin/rustup{EXE_SUFFIX}"));
+        fs::create_dir_all(rustup.parent().unwrap()).unwrap();
+        fs::write(&rustup, "old rustup").unwrap();
+
+        SelfUpdateLock::lock(&process.process)
+            .unwrap()
+            .install_bins_from(
+                &root.path().join("missing-updater"),
+                rustup.parent().unwrap(),
+                false,
+            )
+            .unwrap_err();
+
+        assert_eq!(fs::read_to_string(rustup).unwrap(), "old rustup");
+    }
+
+    #[test]
+    fn failed_replace_preserves_existing_rustup() {
+        let root = test_dir().unwrap();
+        let rustup = root.path().join(format!("rustup{EXE_SUFFIX}"));
+        fs::write(&rustup, "old rustup").unwrap();
+
+        replace_rustup_binary(&root.path().join("missing"), &rustup).unwrap_err();
+
+        assert_eq!(fs::read_to_string(rustup).unwrap(), "old rustup");
+    }
+
+    #[test]
+    fn replace_publishes_pending_rustup() {
+        let root = test_dir().unwrap();
+        let rustup = root.path().join(format!("rustup{EXE_SUFFIX}"));
+        let pending = root.path().join("pending");
+        fs::write(&rustup, "old rustup").unwrap();
+        fs::write(&pending, "new rustup").unwrap();
+
+        replace_rustup_binary(&pending, &rustup).unwrap();
+
+        assert_eq!(fs::read_to_string(rustup).unwrap(), "new rustup");
+        assert!(!pending.exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_keeps_locked_updater() {
+        let root = test_dir().unwrap();
+        let process = test_process(root.path());
+        let lock = SelfUpdateLock::lock(&process.process).unwrap();
+        let updater = updater_path(&lock.directory);
+        fs::write(&updater, "").unwrap();
+        fs::write(Marker::Complete.path(&lock.directory), "").unwrap();
+
+        cleanup_at(
+            &process.process,
+            &process.process.cargo_home().unwrap().join("bin"),
+            SystemTime::now(),
+        )
+        .unwrap();
+
+        assert!(updater.exists());
+        drop(lock);
+        cleanup_at(
+            &process.process,
+            &process.process.cargo_home().unwrap().join("bin"),
+            SystemTime::now(),
+        )
+        .unwrap();
+        assert!(!updater.exists());
+    }
+
+    #[tokio::test]
+    async fn spawn_replacer_rejects_parentless_path() {
+        let root = test_dir().unwrap();
+        let process = test_process(root.path());
+        let prepared_updater = PreparedUpdater {
+            path: PathBuf::new(),
+            _lock: SelfUpdateLock::lock(&process.process).unwrap(),
+        };
+        let error = prepared_updater.spawn_replacer().err().unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            "self-updater path has no parent directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_keeps_fresh_updater() {
+        let root = test_dir().unwrap();
+        let process = test_process(root.path());
+        let prepared_updater = prepared_updater(&process);
+        let updater = prepared_updater.to_path_buf();
+        fs::write(&updater, "").unwrap();
+        drop(prepared_updater);
+
+        cleanup_at(
+            &process.process,
+            &process.process.cargo_home().unwrap().join("bin"),
+            SystemTime::now(),
+        )
+        .unwrap();
+
+        assert!(updater.exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_finished_updater() {
+        let root = test_dir().unwrap();
+        let process = test_process(root.path());
+        let stage = stage_root(&process.process).unwrap();
+
+        for marker in [Marker::Complete, Marker::Failed] {
+            let prepared_updater = prepared_updater(&process);
+            let updater = prepared_updater.to_path_buf();
+            fs::write(&updater, "").unwrap();
+            drop(prepared_updater);
+            marker.record(&process.process, &stage).unwrap();
+
+            cleanup_at(
+                &process.process,
+                &process.process.cargo_home().unwrap().join("bin"),
+                SystemTime::now(),
+            )
+            .unwrap();
+
+            assert!(!updater.exists());
+            assert!(!marker.path(&stage).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_abandoned_updater() {
+        let root = test_dir().unwrap();
+        let process = test_process(root.path());
+        let prepared_updater = prepared_updater(&process);
+        let updater = prepared_updater.to_path_buf();
+        fs::write(&updater, "").unwrap();
+        drop(prepared_updater);
+
+        cleanup_at(
+            &process.process,
+            &process.process.cargo_home().unwrap().join("bin"),
+            SystemTime::now() + ABANDONED_UPDATE_AGE + Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert!(!updater.exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_delays_removing_legacy_updater() {
+        let root = test_dir().unwrap();
+        let process = test_process(root.path());
+        let bin_path = root.path().join("cargo/bin");
+        let updater = bin_path.join(format!("rustup-init{EXE_SUFFIX}"));
+        fs::create_dir_all(&bin_path).unwrap();
+        fs::write(&updater, "").unwrap();
+
+        cleanup_at(&process.process, &bin_path, SystemTime::now()).unwrap();
+        assert!(updater.exists());
+
+        cleanup_at(
+            &process.process,
+            &bin_path,
+            SystemTime::now() + ABANDONED_UPDATE_AGE + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(!updater.exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_abandoned_pending_binary() {
+        let root = test_dir().unwrap();
+        let process = test_process(root.path());
+        let bin_path = root.path().join("cargo/bin");
+        let pending = bin_path.join(format!("{PENDING_BINARY_PREFIX}orphan"));
+        fs::create_dir_all(&bin_path).unwrap();
+        fs::write(&pending, "").unwrap();
+
+        cleanup_at(&process.process, &bin_path, SystemTime::now()).unwrap();
+        assert!(pending.exists());
+
+        cleanup_at(
+            &process.process,
+            &bin_path,
+            SystemTime::now() + ABANDONED_UPDATE_AGE + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(!pending.exists());
+    }
+
+    fn test_process(root: &Path) -> TestProcess {
+        let mut vars = HashMap::new();
+        vars.env("HOME", root);
+        vars.env("CARGO_HOME", root.join("cargo"));
+        vars.env("RUSTUP_HOME", root.join("rustup"));
+        TestProcess::with_vars(vars)
+    }
+
+    fn prepared_updater(tp: &TestProcess) -> PreparedUpdater {
+        PreparedUpdater::try_from(SelfUpdateLock::lock(&tp.process).unwrap()).unwrap()
+    }
+}

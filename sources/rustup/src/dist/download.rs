@@ -1,0 +1,545 @@
+use std::{
+    borrow::Cow,
+    fs,
+    io::Read,
+    ops,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+use anyhow::{Context, anyhow};
+use indicatif::{MultiProgress, ProgressBar, ProgressBarIter, ProgressDrawTarget, ProgressStyle};
+use sha2::{Digest, Sha256};
+use tracing::{debug, info, warn};
+use url::Url;
+
+use crate::{
+    config::Cfg,
+    dist::{
+        Channel, ChannelToolchainName, DEFAULT_DIST_SERVER,
+        manifest::{Manifest, ManifestWithHash},
+        temp,
+    },
+    download::{DownloadOptions, should_keep_partial},
+    errors::RustupError,
+    process::Process,
+    utils,
+};
+
+const UPDATE_HASH_LEN: usize = 20;
+
+pub struct DownloadCfg<'a> {
+    pub tmp_cx: Arc<temp::Context>,
+    pub download_dir: &'a PathBuf,
+    pub(super) tracker: DownloadTracker,
+    pub permit_copy_rename: bool,
+    pub process: &'a Process,
+}
+
+impl<'a> DownloadCfg<'a> {
+    /// construct a download configuration
+    pub(crate) fn new(cfg: &'a Cfg<'a>) -> Self {
+        DownloadCfg {
+            tmp_cx: Arc::new(temp::Context::new(
+                cfg.rustup_dir.join("tmp"),
+                cfg.dist_root_server.as_str(),
+            )),
+            download_dir: &cfg.download_dir,
+            tracker: DownloadTracker::new(!cfg.quiet, cfg.process),
+            permit_copy_rename: cfg.process.permit_copy_rename(),
+            process: cfg.process,
+        }
+    }
+
+    /// Same as [`DownloadCfg::download()`], but also retries the download if it fails.
+    ///
+    /// Only certain errors are considered retriable, and the download will be retried up to
+    /// `retries` times. The error from the latest retry is returned if all retries are exhausted.
+    pub(crate) async fn download_with_retry(
+        &self,
+        url: &Url,
+        hash: &str,
+        status: &DownloadStatus,
+        mut retries: usize,
+    ) -> anyhow::Result<File> {
+        loop {
+            let downloaded = self.partial_len(hash);
+            let future = self.download(url, hash, status);
+            let err = match future.await {
+                Err(err) => err,
+                Ok(file) => break Ok(file),
+            };
+
+            // retry only known retriable cases
+            match err.downcast_ref::<RustupError>() {
+                Some(RustupError::BrokenPartialFile)
+                | Some(RustupError::IncompletePartialFile)
+                | Some(RustupError::DownloadingFile { .. }) => {}
+                _ => return Err(err),
+            }
+
+            let progress = self.partial_len(hash).saturating_sub(downloaded);
+            if progress < Self::MIN_PROGRESS {
+                if retries == 0 {
+                    return Err(err);
+                }
+                retries -= 1;
+            }
+
+            status.retrying();
+        }
+    }
+
+    /// Downloads a file and validates its hash. Resumes interrupted downloads.
+    /// Partial downloads are stored in `self.download_dir`, keyed by hash. If the
+    /// target file already exists, then the hash is checked and it is returned
+    /// immediately without re-downloading.
+    pub(crate) async fn download(
+        &self,
+        url: &Url,
+        hash: &str,
+        status: &DownloadStatus,
+    ) -> anyhow::Result<File> {
+        utils::ensure_dir_exists("Download Directory", self.download_dir)?;
+        let target_file = self.download_dir.join(Path::new(hash));
+        let partial_file_path = self.partial_file_path(hash);
+        let partial_file_existed = partial_file_path.exists();
+
+        if target_file.exists() {
+            let cached_result = file_hash(&target_file)?;
+            if hash == cached_result {
+                debug!("reusing previously downloaded file");
+                debug!(url = url.as_ref(), "checksum passed");
+                return Ok(File { path: target_file });
+            } else {
+                warn!("bad checksum for cached download");
+                fs::remove_file(&target_file).context("cleaning up previous download")?;
+            }
+        }
+
+        let mut hasher = Sha256::new();
+        let mut download = DownloadOptions::try_from(self.process)?
+            .start(url, &partial_file_path)
+            .with_hasher(&mut hasher)
+            .with_status(status)
+            .with_resume();
+
+        if let Err(e) = download.download().await {
+            let should_keep_partial = should_keep_partial(&e);
+            let err = Err(e);
+            return match (partial_file_existed, should_keep_partial) {
+                (true, true) => err.context(RustupError::IncompletePartialFile),
+                (true, false) => err.context(RustupError::BrokenPartialFile),
+                (false, _) => err,
+            };
+        };
+
+        let actual_hash = faster_hex::hex_string(&hasher.finalize());
+
+        if hash != actual_hash {
+            // Incorrect hash
+            if partial_file_existed {
+                self.clean(&[hash.to_string() + ".partial"])?;
+                Err(anyhow!(RustupError::BrokenPartialFile))
+            } else {
+                Err(RustupError::ChecksumFailed {
+                    url: url.to_string(),
+                    expected: hash.to_string(),
+                    calculated: actual_hash,
+                }
+                .into())
+            }
+        } else {
+            debug!(url = url.as_ref(), "checksum passed");
+            utils::rename(
+                "downloaded",
+                &partial_file_path,
+                &target_file,
+                self.permit_copy_rename,
+            )?;
+            Ok(File { path: target_file })
+        }
+    }
+
+    /// The number of bytes already downloaded for the file with the given hash
+    pub(crate) fn partial_len(&self, hash: &str) -> u64 {
+        match fs::metadata(self.partial_file_path(hash)) {
+            Ok(metadata) => metadata.len(),
+            Err(_) => 0,
+        }
+    }
+
+    fn partial_file_path(&self, hash: &str) -> PathBuf {
+        self.download_dir.join(format!("{hash}.partial"))
+    }
+
+    pub(crate) fn clean(&self, hashes: &[impl AsRef<Path>]) -> anyhow::Result<()> {
+        for hash in hashes.iter() {
+            let used_file = self.download_dir.join(hash);
+            if self.download_dir.join(&used_file).exists() {
+                fs::remove_file(used_file).context("cleaning up cached downloads")?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn download_hash(&self, url: &str) -> anyhow::Result<String> {
+        let hash_url = utils::parse_url(&(url.to_owned() + ".sha256"))?;
+        let hash_file = self.tmp_cx.new_file()?;
+        DownloadOptions::try_from(self.process)?
+            .start(&hash_url, &hash_file)
+            .download()
+            .await?;
+
+        let mut contents = utils::read_file("hash", &hash_file)?;
+        // NOTE: According to <https://www.gnu.org/software/coreutils/manual/html_node/md5sum-invocation.html>,
+        // the first column of a `.sha256` file must be a SHA256 sum in hex characters.
+        let hash_len = 64;
+        if let Some(hash) = contents.split_whitespace().next()
+            && hash.len() == hash_len
+            && hash.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            contents.truncate(hash_len);
+            return Ok(contents);
+        }
+        Err(anyhow!(
+            "illegal hash file found at `{hash_url}`, expected a checksum in {hash_len} hex characters"
+        ))
+    }
+
+    pub(crate) async fn dl_v2_manifest(
+        &self,
+        update_hash: Option<&Path>,
+        toolchain: &ChannelToolchainName,
+        cfg: &Cfg<'_>,
+    ) -> anyhow::Result<Option<ManifestWithHash>> {
+        let manifest_url = toolchain.manifest_v2_url(&cfg.dist_root_url, self.process);
+        match self
+            .download_and_check(&manifest_url, update_hash, None, ".toml")
+            .await
+        {
+            Ok(manifest_dl) => {
+                // Downloaded ok!
+                let Some((manifest_file, hash)) = manifest_dl else {
+                    return Ok(None);
+                };
+                let manifest_str = utils::read_file("manifest", &manifest_file)?;
+                let manifest =
+                    Manifest::parse(&manifest_str).with_context(|| RustupError::ParsingFile {
+                        name: "manifest",
+                        path: manifest_file.to_path_buf(),
+                    })?;
+
+                Ok(Some(ManifestWithHash { manifest, hash }))
+            }
+            Err(err) => {
+                if let Some(RustupError::ChecksumFailed { .. }) = err.downcast_ref::<RustupError>()
+                {
+                    // Manifest checksum mismatched.
+                    warn!("{err:#}");
+
+                    if cfg.dist_root_url.starts_with(DEFAULT_DIST_SERVER) {
+                        info!(
+                            "this is likely due to an ongoing update of the official release server, please try again later"
+                        );
+                        info!(
+                            "see <https://github.com/rust-lang/rustup/issues/3390> for more details"
+                        );
+                    } else {
+                        info!(
+                            "this might indicate an issue with the third-party release server '{}'",
+                            cfg.dist_root_url
+                        );
+                        info!(
+                            "see <https://github.com/rust-lang/rustup/issues/3885> for more details"
+                        );
+                    }
+                }
+                Err(err)
+            }
+        }
+    }
+
+    pub(super) async fn dl_v1_manifest(
+        &self,
+        dist_root: &str,
+        toolchain: &ChannelToolchainName,
+    ) -> anyhow::Result<Vec<String>> {
+        let root_url = toolchain.package_dir(dist_root);
+
+        if let Channel::Version(ver) = &toolchain.channel {
+            // This is an explicit version. In v1 there was no manifest,
+            // you just know the file to download, so synthesize one.
+            let installer_name = format!("{}/rust-{}-{}.tar.gz", root_url, ver, toolchain.target);
+            return Ok(vec![installer_name]);
+        }
+
+        let manifest_url = toolchain.manifest_v1_url(dist_root, self.process);
+        let manifest_dl = self
+            .download_and_check(&manifest_url, None, None, "")
+            .await?;
+        let (manifest_file, _) = manifest_dl.unwrap();
+        let manifest_str = utils::read_file("manifest", &manifest_file)?;
+        let urls = manifest_str
+            .lines()
+            .map(|s| format!("{root_url}/{s}"))
+            .collect();
+
+        Ok(urls)
+    }
+
+    /// Downloads a file, sourcing its hash from the same url with a `.sha256` suffix.
+    /// If `update_hash` is present, then that will be compared to the downloaded hash,
+    /// and if they match, the download is skipped.
+    /// Verifies the signature found at the same url with a `.asc` suffix, and prints a
+    /// warning when the signature does not verify, or is not found.
+    pub(crate) async fn download_and_check(
+        &self,
+        url_str: &str,
+        update_hash: Option<&Path>,
+        status: Option<&DownloadStatus>,
+        ext: &str,
+    ) -> anyhow::Result<Option<(temp::File, String)>> {
+        let hash = self.download_hash(url_str).await?;
+        let partial_hash: String = hash.chars().take(UPDATE_HASH_LEN).collect();
+
+        if let Some(hash_file) = update_hash {
+            if utils::is_file(hash_file) {
+                if let Ok(contents) = utils::read_file("update hash", hash_file) {
+                    if contents == partial_hash {
+                        // Skip download, update hash matches
+                        return Ok(None);
+                    }
+                } else {
+                    warn!(
+                        "can't read update hash {}, can't skip update",
+                        hash_file.display()
+                    );
+                }
+            } else {
+                debug!(file = %hash_file.display(), "no update hash file found");
+            }
+        }
+
+        let url = utils::parse_url(url_str)?;
+        let file = self.tmp_cx.new_file_with_ext("", ext)?;
+
+        let mut hasher = Sha256::new();
+        let download = DownloadOptions::try_from(self.process)?
+            .start(&url, &file)
+            .with_hasher(&mut hasher);
+
+        let mut download = match status {
+            Some(status) => download.with_status(status),
+            None => download,
+        };
+
+        download.download().await?;
+        let actual_hash = faster_hex::hex_string(&hasher.finalize());
+
+        if hash != actual_hash {
+            // Incorrect hash
+            return Err(RustupError::ChecksumFailed {
+                url: url_str.to_owned(),
+                expected: hash,
+                calculated: actual_hash,
+            }
+            .into());
+        } else {
+            debug!(url = url_str, "checksum passed");
+        }
+
+        Ok(Some((file, partial_hash)))
+    }
+
+    pub(crate) fn status_for(
+        &self,
+        component_name: impl Into<Cow<'static, str>>,
+        name_width: usize,
+    ) -> DownloadStatus {
+        let progress = ProgressBar::hidden();
+        progress.set_style(
+            DownloadStatus::progress_style(
+                name_width,
+                "downloading [{bar:15}] {total_bytes:>11} ({bytes_per_sec}, ETA: {eta})",
+            )
+            .progress_chars("## "),
+        );
+        progress.set_prefix(component_name);
+        self.tracker.multi_progress_bars.add(progress.clone());
+
+        DownloadStatus {
+            progress,
+            retry_time: Mutex::new(None),
+            name_width,
+        }
+    }
+
+    pub(crate) fn max_retries(&self) -> usize {
+        const DEFAULT_MAX_RETRIES: usize = 3;
+
+        match self.process.var("RUSTUP_MAX_RETRIES") {
+            Ok(s) if let Ok(n) = s.parse() => n,
+            Ok(_) | Err(_) => DEFAULT_MAX_RETRIES,
+        }
+    }
+
+    pub(crate) fn url(&self, url: &str) -> anyhow::Result<Url> {
+        match &*self.tmp_cx.dist_server {
+            server if server != DEFAULT_DIST_SERVER => utils::parse_url(
+                &url.replace(DEFAULT_DIST_SERVER, self.tmp_cx.dist_server.as_str()),
+            ),
+            _ => utils::parse_url(url),
+        }
+    }
+
+    const MIN_PROGRESS: u64 = 1024 * 1024;
+}
+
+/// Tracks download progress and displays information about it to a terminal.
+pub(crate) struct DownloadTracker {
+    /// MultiProgress bar for the downloads.
+    multi_progress_bars: MultiProgress,
+}
+
+impl DownloadTracker {
+    /// Creates a new DownloadTracker.
+    pub(crate) fn new(display_progress: bool, process: &Process) -> Self {
+        let multi_progress_bars = MultiProgress::with_draw_target(if display_progress {
+            process.progress_draw_target()
+        } else {
+            ProgressDrawTarget::hidden()
+        });
+        // Help avoid flickering by moving the cursor instead of clearing the line.
+        multi_progress_bars.set_move_cursor(true);
+        Self {
+            multi_progress_bars,
+        }
+    }
+}
+
+pub(crate) struct DownloadStatus {
+    progress: ProgressBar,
+    /// The instant where the download is being retried.
+    ///
+    /// Allows us to delay the reappearance of the progress bar so that the user can see
+    /// the message "retrying download" for at least a second. Without it, the progress
+    /// bar would reappear immediately, not allowing the user to correctly see the message,
+    /// before the progress bar starts again.
+    retry_time: Mutex<Option<Instant>>,
+    /// The dynamic maximum width of the component names for alignment
+    name_width: usize,
+}
+
+impl DownloadStatus {
+    pub(crate) fn received_length(&self, len: u64, resumed: u64) {
+        self.progress.reset();
+        self.progress.set_length(len);
+        self.progress.set_position(resumed);
+    }
+
+    pub(crate) fn received_data(&self, len: usize) {
+        self.progress.inc(len as u64);
+        let mut retry_time = self.retry_time.lock().unwrap();
+        if !retry_time.is_some_and(|instant| instant.elapsed() > Duration::from_secs(1)) {
+            return;
+        }
+
+        *retry_time = None;
+        self.progress.set_style(
+            Self::progress_style(
+                self.name_width,
+                "downloading [{bar:15}] {total_bytes:>11} ({bytes_per_sec}, ETA: {eta})",
+            )
+            .progress_chars("## "),
+        );
+    }
+
+    pub(crate) fn finished(&self) {
+        self.progress.set_style(Self::progress_style(
+            self.name_width,
+            "pending installation {total_bytes:>20}",
+        ));
+        self.progress.tick(); // A tick is needed for the new style to appear, as it is static.
+    }
+
+    pub(crate) fn failed(&self) {
+        self.progress.set_style(Self::progress_style(
+            self.name_width,
+            "download failed after {elapsed}",
+        ));
+        self.progress.finish();
+    }
+
+    pub(crate) fn retrying(&self) {
+        *self.retry_time.lock().unwrap() = Some(Instant::now());
+        self.progress.set_style(Self::progress_style(
+            self.name_width,
+            "retrying download...",
+        ));
+    }
+
+    pub(crate) fn unpack<T: Read>(&self, inner: T) -> ProgressBarIter<T> {
+        self.progress.reset();
+        self.progress.set_style(
+            Self::progress_style(
+                self.name_width,
+                "unpacking   [{bar:15}] {total_bytes:>11} ({bytes_per_sec}, ETA: {eta})",
+            )
+            .progress_chars("## "),
+        );
+        self.progress.wrap_read(inner)
+    }
+
+    pub(crate) fn installing(&self) {
+        self.progress.set_style(
+            Self::progress_style(
+                self.name_width,
+                "installing {spinner:.green} {total_bytes:>28}",
+            )
+            .tick_chars(r"|/-\ "),
+        );
+        self.progress.enable_steady_tick(Duration::from_millis(100));
+    }
+
+    pub(crate) fn installed(&self) {
+        self.progress.set_message("installed");
+        self.progress.set_style(Self::progress_style(
+            self.name_width,
+            "{msg:.green.bold} {total_bytes:>31}",
+        ));
+        self.progress.finish();
+    }
+
+    fn progress_style(name_width: usize, suffix: &str) -> ProgressStyle {
+        let template = format!("{{prefix:>{name_width}.bold}} {suffix}");
+        ProgressStyle::with_template(&template).unwrap()
+    }
+}
+
+fn file_hash(path: &Path) -> anyhow::Result<String> {
+    let mut hasher = Sha256::new();
+    let mut downloaded = utils::buffered(path)?;
+    let mut buf = vec![0; 32768];
+    while let Ok(n) = downloaded.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+
+    Ok(faster_hex::hex_string(&hasher.finalize()))
+}
+
+pub(crate) struct File {
+    path: PathBuf,
+}
+
+impl ops::Deref for File {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        self.path.as_path()
+    }
+}

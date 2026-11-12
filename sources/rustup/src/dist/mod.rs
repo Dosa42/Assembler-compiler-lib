@@ -1,0 +1,1493 @@
+//! Installation from a Rust distribution server
+
+use std::{
+    collections::HashSet, env, fmt, io::Write, ops::Deref, path::PathBuf, str::FromStr,
+    sync::LazyLock,
+};
+
+use anyhow::{Context, anyhow};
+use chrono::NaiveDate;
+use clap::{ValueEnum, builder::PossibleValue};
+use itertools::Itertools;
+use regex::{Match, Regex};
+use serde::{Deserialize, Serialize};
+use thiserror::Error as ThisError;
+use tracing::{debug, info, warn};
+
+use crate::{
+    config::Cfg,
+    errors::{NIGHTLY_COMPONENT_NOTE, RustupError},
+    process::Process,
+    toolchain::{ChannelToolchain, ToolchainNameExt},
+    utils,
+};
+
+pub mod component;
+pub(crate) mod config;
+
+pub mod download;
+use download::DownloadCfg;
+
+pub mod manifest;
+use manifest::{Component, Manifest as ManifestV2, ManifestWithHash};
+
+pub mod manifestation;
+use manifestation::{Changes, Manifestation, UpdateStatus};
+
+pub mod prefix;
+use prefix::InstallPrefix;
+
+pub mod temp;
+
+pub(crate) mod target_tuple;
+pub(crate) use target_tuple::*;
+
+pub static DEFAULT_DIST_SERVER: &str = "https://static.rust-lang.org";
+
+/// Returns a error message indicating that certain [`Component`]s are missing in a toolchain distribution.
+///
+/// This message is currently used exclusively in toolchain-wide operations,
+/// otherwise [`component_unavailable_msg`](../../errors/fn.component_unavailable_msg.html) will be used.
+///
+/// # Panics
+/// This function will panic when the collection of unavailable components `cs` is empty.
+fn components_missing_msg(cs: &[Component], manifest: &ManifestV2, toolchain: &str) -> String {
+    let mut buf = vec![];
+
+    match cs {
+        [] => panic!(
+            "`components_missing_msg` should not be called with an empty collection of unavailable components"
+        ),
+        [c] => {
+            let _ = writeln!(
+                buf,
+                "component {} is unavailable for download for channel '{}'",
+                manifest.description(c),
+                toolchain,
+            );
+        }
+        cs => {
+            let cs_str = cs
+                .iter()
+                .map(|c| manifest.description(c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                buf,
+                "some components are unavailable for download for channel '{toolchain}': {cs_str}"
+            );
+        }
+    }
+
+    if toolchain.starts_with("nightly") {
+        let _ = write!(
+            buf,
+            "{NIGHTLY_COMPONENT_NOTE}\n\
+        help: if you don't need these components, you could try a minimal installation with:\n\
+        help:     rustup toolchain add {toolchain} --profile minimal\n\
+        help: if you require these components, please install and use the latest successfully built version,\n\
+        help: which you can find at <https://rust-lang.github.io/rustup-components-history>\n\
+        help: after determining the correct date, install it with a command such as:\n\
+        help:     rustup toolchain install nightly-2018-12-27\n\
+        help: then you can use the toolchain with commands such as:\n\
+        help:     cargo +nightly-2018-12-27 build"
+        );
+    } else if ["beta", "stable"].iter().any(|&p| toolchain.starts_with(p)) {
+        let _ = write!(
+            buf,
+            "\
+One or many components listed above might have been permanently removed from newer versions
+of the official Rust distribution due to deprecation.
+
+You can find the list of removed components at
+<https://rust-lang.github.io/rustup/devel/concepts/components.html#previous-components>.
+
+If you are updating an existing toolchain, after determining the deprecated component(s)
+and/or target(s) in question, please remove them with:
+
+    rustup component remove --toolchain {toolchain} <COMPONENT>...
+    rustup target remove --toolchain {toolchain} <TARGET>...
+
+After that, you should be able to continue with the update as usual.",
+        );
+    }
+
+    String::from_utf8(buf).unwrap()
+}
+
+#[derive(Debug, ThisError)]
+pub enum DistError {
+    #[error("{}", components_missing_msg(.0, .1, .2))]
+    ToolchainComponentsMissing(Vec<Component>, Box<ManifestV2>, String),
+    #[error("no release found for '{0}'")]
+    MissingReleaseForToolchain(String),
+    #[error("invalid toolchain name: '{0}'")]
+    InvalidOfficialName(String),
+    #[error(
+        "host tuple '{0}' not found in channel manifest
+help: this could mean that it has been demoted and no longer has a host toolchain
+help: see <https://doc.rust-lang.org/nightly/rustc/platform-support.html> for available targets"
+    )]
+    HostTupleUnsupported(TargetTuple),
+}
+
+#[derive(Debug, PartialEq)]
+struct ParsedChannelToolchainName {
+    channel: Channel,
+    date: Option<String>,
+    target: Option<String>,
+}
+
+impl FromStr for ParsedChannelToolchainName {
+    type Err = anyhow::Error;
+    fn from_str(desc: &str) -> anyhow::Result<Self> {
+        // Note this regex gives you a guaranteed match of the channel (1)
+        // and an optional match of the date (2) and target (3)
+        static TOOLCHAIN_CHANNEL_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(&format!(
+                r"^({})(?:-([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}))?(?:-(.+))?$",
+                // The channel patterns we support
+                [
+                    "nightly",
+                    "beta",
+                    "stable",
+                    // Allow from 1.0.0 through to 9.999.99 with optional patch version
+                    // and optional beta tag
+                    r"[0-9]{1}\.(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]?))?(?:-beta(?:\.[0-9]{1,2})?)?",
+                ]
+                .join("|")
+            ))
+            .unwrap()
+        });
+
+        let d = TOOLCHAIN_CHANNEL_RE
+            .captures(desc)
+            .ok_or_else(|| RustupError::InvalidToolchainName(desc.to_string()))?;
+
+        // These versions don't have v2 manifests, but they don't have point releases either,
+        // so to make the two-part version numbers work for these versions, specially turn
+        // them into their corresponding ".0" version.
+        let channel = match d.get(1).unwrap().as_str() {
+            "1.0" => "1.0.0",
+            "1.1" => "1.1.0",
+            "1.2" => "1.2.0",
+            "1.3" => "1.3.0",
+            "1.4" => "1.4.0",
+            "1.5" => "1.5.0",
+            "1.6" => "1.6.0",
+            "1.7" => "1.7.0",
+            "1.8" => "1.8.0",
+            other => other,
+        };
+
+        fn non_empty_string(s: Option<Match<'_>>) -> Option<String> {
+            let s = s?.as_str();
+            (!s.is_empty()).then(|| s.to_owned())
+        }
+
+        Ok(Self {
+            channel: Channel::from_str(channel)?,
+            date: non_empty_string(d.get(2)),
+            target: non_empty_string(d.get(3)),
+        })
+    }
+}
+
+/// A toolchain descriptor from rustup's perspective. These contain
+/// 'partial target tuples', which allow toolchain names like
+/// 'stable-msvc' to work. Partial target tuples though are parsed
+/// from a hardcoded set of known tuples, whereas target tuples
+/// are nearly-arbitrary strings.
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
+pub struct PartialChannelToolchainName {
+    pub channel: Channel,
+    pub date: Option<String>,
+    pub target: PartialTargetTuple,
+}
+
+impl PartialChannelToolchainName {
+    /// Create a toolchain desc using input_host to fill in missing fields
+    pub(crate) fn complete(self, input_host: &TargetTuple) -> anyhow::Result<ChannelToolchainName> {
+        Ok(ChannelToolchainName {
+            channel: self.channel,
+            date: self.date,
+            target: self.target.complete(input_host)?,
+        })
+    }
+}
+
+impl FromStr for PartialChannelToolchainName {
+    type Err = anyhow::Error;
+    fn from_str(name: &str) -> anyhow::Result<Self> {
+        let parsed: ParsedChannelToolchainName = name.parse()?;
+        let target = PartialTargetTuple::new(parsed.target.as_deref().unwrap_or(""));
+
+        target
+            .map(|target| Self {
+                channel: parsed.channel,
+                date: parsed.date,
+                target,
+            })
+            .ok_or_else(|| anyhow!(RustupError::InvalidToolchainName(name.to_string())))
+    }
+}
+
+impl fmt::Display for PartialChannelToolchainName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.channel)?;
+
+        if let Some(date) = &self.date {
+            write!(f, "-{date}")?;
+        }
+        if !self.target.is_empty() {
+            write!(f, "-{}", self.target)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Fully-resolved toolchain descriptors. These always have full target
+/// tuples attached to them and are used for canonical identification,
+/// such as naming their installation directory.
+///
+/// As strings they look like stable-x86_64-pc-windows-msvc or
+/// 1.55-x86_64-pc-windows-msvc
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
+pub struct ChannelToolchainName {
+    pub channel: Channel,
+    pub date: Option<String>,
+    pub target: TargetTuple,
+}
+
+impl ChannelToolchainName {
+    pub(crate) fn manifest_v1_url(&self, dist_root: &str, process: &Process) -> String {
+        let do_manifest_staging = process.var("RUSTUP_STAGED_MANIFEST").is_ok();
+        match (self.date.as_ref(), do_manifest_staging) {
+            (None, false) => format!("{}/channel-rust-{}", dist_root, self.channel),
+            (Some(date), false) => format!("{}/{}/channel-rust-{}", dist_root, date, self.channel),
+            (None, true) => format!("{}/staging/channel-rust-{}", dist_root, self.channel),
+            (Some(_), true) => panic!("not a real-world case"),
+        }
+    }
+
+    pub(crate) fn manifest_v2_url(&self, dist_root: &str, process: &Process) -> String {
+        format!("{}.toml", self.manifest_v1_url(dist_root, process))
+    }
+    /// Either "$channel" or "channel-$date"
+    pub fn manifest_name(&self) -> String {
+        match &self.date {
+            None => self.channel.to_string(),
+            Some(date) => format!("{}-{}", self.channel, date),
+        }
+    }
+
+    pub(crate) fn package_dir(&self, dist_root: &str) -> String {
+        match &self.date {
+            None => dist_root.to_string(),
+            Some(date) => format!("{dist_root}/{date}"),
+        }
+    }
+
+    /// Toolchain channels are considered 'tracking' if it is one of the named channels
+    /// such as `stable`, or is an incomplete version such as `1.48`, and the
+    /// date field is empty.
+    pub(crate) fn is_tracking(&self) -> bool {
+        match &self.channel {
+            _ if self.date.is_some() => false,
+            Channel::Stable | Channel::Beta | Channel::Nightly => true,
+            Channel::Version(ver) => ver.patch.is_none() || &*ver.pre == "beta",
+        }
+    }
+}
+
+impl ToolchainNameExt for ChannelToolchainName {}
+
+impl FromStr for ChannelToolchainName {
+    type Err = anyhow::Error;
+    fn from_str(name: &str) -> anyhow::Result<Self> {
+        let parsed: ParsedChannelToolchainName = name.parse()?;
+
+        if parsed.target.is_none() {
+            return Err(anyhow!(RustupError::InvalidToolchainName(name.to_string())));
+        }
+
+        Ok(Self {
+            channel: parsed.channel,
+            date: parsed.date,
+            target: TargetTuple(parsed.target.unwrap()),
+        })
+    }
+}
+
+impl fmt::Display for ChannelToolchainName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.channel)?;
+
+        if let Some(date) = &self.date {
+            write!(f, "-{date}")?;
+        }
+        write!(f, "-{}", self.target)?;
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
+pub enum Channel {
+    Stable,
+    Beta,
+    Nightly,
+    Version(PartialVersion),
+}
+
+impl fmt::Display for Channel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stable => write!(f, "stable"),
+            Self::Beta => write!(f, "beta"),
+            Self::Nightly => write!(f, "nightly"),
+            Self::Version(ver) => write!(f, "{ver}"),
+        }
+    }
+}
+
+impl FromStr for Channel {
+    type Err = anyhow::Error;
+    fn from_str(chan: &str) -> anyhow::Result<Self> {
+        match chan {
+            "stable" => Ok(Self::Stable),
+            "beta" => Ok(Self::Beta),
+            "nightly" => Ok(Self::Nightly),
+            ver => ver.parse().map(Self::Version),
+        }
+    }
+}
+
+/// A possibly incomplete Rust toolchain version that
+/// can be converted from and to its string form.
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
+pub struct PartialVersion {
+    pub major: u64,
+    pub minor: Option<u64>,
+    pub patch: Option<u64>,
+    pub pre: semver::Prerelease,
+}
+
+impl fmt::Display for PartialVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.major)?;
+        if let Some(minor) = self.minor {
+            write!(f, ".{minor}")?;
+        }
+        if let Some(patch) = self.patch {
+            write!(f, ".{patch}")?;
+        }
+        if !self.pre.is_empty() {
+            write!(f, "-{}", self.pre)?;
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for PartialVersion {
+    type Err = anyhow::Error;
+    fn from_str(ver: &str) -> anyhow::Result<Self> {
+        // `semver::Comparator::from_str` supports an optional operator
+        // (e.g. `=`, `>`, `>=`, `<`, `<=`, `~`, `^`, `*`) before the
+        // partial version, so we should exclude that case first.
+        if let Some(ch) = ver.chars().nth(0)
+            && !ch.is_ascii_digit()
+        {
+            return Err(
+                anyhow!("expected ASCII digit at the beginning of `{ver}`, found `{ch}`")
+                    .context("error parsing `PartialVersion`"),
+            );
+        }
+        let (ver, pre) = ver.split_once('-').unwrap_or((ver, ""));
+        let comparator =
+            semver::Comparator::from_str(ver).context("error parsing `PartialVersion`")?;
+        Ok(Self {
+            major: comparator.major,
+            minor: comparator.minor,
+            patch: comparator.patch,
+            pre: semver::Prerelease::new(pre).context("error parsing `PartialVersion`")?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
+#[serde(transparent)]
+pub struct TargetTuple(String);
+
+impl TargetTuple {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    pub(crate) fn from_build() -> Self {
+        if let Some(tuple) = option_env!("RUSTUP_OVERRIDE_BUILD_TUPLE") {
+            Self::new(tuple)
+        } else if let Some(tuple) = option_env!("RUSTUP_OVERRIDE_BUILD_TRIPLE") {
+            Self::new(tuple)
+        } else {
+            Self::new(env!("TARGET"))
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn is_host_emulated() -> bool {
+        false
+    }
+
+    /// Detects Rosetta emulation on macOS
+    #[cfg(target_os = "macos")]
+    pub(crate) fn is_host_emulated() -> bool {
+        unsafe {
+            let mut ret: libc::c_int = 0;
+            let mut size = size_of::<libc::c_int>() as libc::size_t;
+            let err = libc::sysctlbyname(
+                c"sysctl.proc_translated".as_ptr().cast(),
+                (&mut ret) as *mut _ as *mut libc::c_void,
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            );
+            err == 0 && ret != 0
+        }
+    }
+
+    pub(crate) fn from_host(process: &Process) -> Option<Self> {
+        #[cfg(windows)]
+        fn inner() -> Option<TargetTuple> {
+            use std::mem;
+
+            /// Get the host architecture using `IsWow64Process2`. This function
+            /// produces the most accurate results (supports detecting aarch64), but
+            /// it is only available on Windows 10 1511+, so we use `GetProcAddress`
+            /// to maintain backward compatibility with older Windows versions.
+            fn arch_primary() -> Option<&'static str> {
+                use windows_sys::{
+                    Win32::{
+                        Foundation::HANDLE,
+                        System::{
+                            LibraryLoader::{GetModuleHandleA, GetProcAddress},
+                            Threading::GetCurrentProcess,
+                        },
+                    },
+                    core::{BOOL, s},
+                };
+
+                const IMAGE_FILE_MACHINE_ARM64: u16 = 0xAA64;
+                const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+                const IMAGE_FILE_MACHINE_I386: u16 = 0x014c;
+
+                #[allow(non_snake_case)]
+                let IsWow64Process2: unsafe extern "system" fn(
+                    HANDLE,
+                    *mut u16,
+                    *mut u16,
+                )
+                    -> BOOL = unsafe {
+                    let module = GetModuleHandleA(s!("kernel32.dll"));
+                    if module.is_null() {
+                        return None;
+                    }
+                    mem::transmute(GetProcAddress(module, s!("IsWow64Process2"))?)
+                };
+
+                let mut _machine = 0;
+                let mut native_machine = 0;
+                unsafe {
+                    // cannot fail; handle does not need to be closed.
+                    let process = GetCurrentProcess();
+                    if IsWow64Process2(process, &mut _machine, &mut native_machine) == 0 {
+                        return None;
+                    }
+                };
+                match native_machine {
+                    IMAGE_FILE_MACHINE_AMD64 => Some("x86_64"),
+                    IMAGE_FILE_MACHINE_I386 => Some("i686"),
+                    IMAGE_FILE_MACHINE_ARM64 => Some("aarch64"),
+                    _ => None,
+                }
+            }
+
+            /// Get the host architecture using `GetNativeSystemInfo`.
+            /// Does not support detecting aarch64.
+            fn arch_fallback() -> Option<&'static str> {
+                use windows_sys::Win32::System::SystemInformation::GetNativeSystemInfo;
+
+                const PROCESSOR_ARCHITECTURE_AMD64: u16 = 9;
+                const PROCESSOR_ARCHITECTURE_INTEL: u16 = 0;
+
+                let mut sys_info;
+                unsafe {
+                    sys_info = mem::zeroed();
+                    GetNativeSystemInfo(&mut sys_info);
+                }
+
+                match unsafe { sys_info.Anonymous.Anonymous }.wProcessorArchitecture {
+                    PROCESSOR_ARCHITECTURE_AMD64 => Some("x86_64"),
+                    PROCESSOR_ARCHITECTURE_INTEL => Some("i686"),
+                    _ => None,
+                }
+            }
+
+            // Default to msvc
+            let arch = arch_primary().or_else(arch_fallback)?;
+            let msvc_tuple = format!("{arch}-pc-windows-msvc");
+            Some(TargetTuple(msvc_tuple))
+        }
+
+        #[cfg(not(windows))]
+        fn inner() -> Option<TargetTuple> {
+            use std::{ffi::CStr, mem};
+
+            let mut sys_info;
+            let (sysname, machine) = unsafe {
+                sys_info = mem::zeroed();
+                if libc::uname(&mut sys_info) == -1 {
+                    return None;
+                }
+
+                (
+                    CStr::from_ptr(sys_info.sysname.as_ptr()).to_bytes(),
+                    CStr::from_ptr(sys_info.machine.as_ptr()).to_bytes(),
+                )
+            };
+
+            #[cfg(not(target_os = "android"))]
+            let host_tuple = match (sysname, machine) {
+                (b"Linux", b"x86_64") => Some(TUPLE_X86_64_UNKNOWN_LINUX),
+                (b"Linux", b"i686") => Some("i686-unknown-linux-gnu"),
+                (b"Linux", b"mips") => Some(TUPLE_MIPS_UNKNOWN_LINUX_GNU),
+                (b"Linux", b"mips64") => Some(TUPLE_MIPS64_UNKNOWN_LINUX_GNUABI64),
+                (b"Linux", b"arm") => Some("arm-unknown-linux-gnueabi"),
+                (b"Linux", b"armv7l") => Some("armv7-unknown-linux-gnueabihf"),
+                (b"Linux", b"armv8l") => Some("armv7-unknown-linux-gnueabihf"),
+                (b"Linux", b"aarch64") => Some(if is_32bit_userspace() {
+                    "armv7-unknown-linux-gnueabihf"
+                } else {
+                    TUPLE_AARCH64_UNKNOWN_LINUX
+                }),
+                (b"Linux", b"loongarch64") => Some(TUPLE_LOONGARCH64_UNKNOWN_LINUX),
+                (b"Linux", b"ppc64") => Some(TUPLE_POWERPC64_UNKNOWN_LINUX),
+                (b"Linux", b"ppc64le") => Some(TUPLE_POWERPC64LE_UNKNOWN_LINUX),
+                (b"Linux", b"riscv64") => Some(TUPLE_RISCV64GC_UNKNOWN_LINUX),
+                (b"Darwin", b"x86_64") => Some("x86_64-apple-darwin"),
+                (b"Darwin", b"i686") => Some("i686-apple-darwin"),
+                (b"FreeBSD", b"x86_64") => Some("x86_64-unknown-freebsd"),
+                (b"FreeBSD", b"i686") => Some("i686-unknown-freebsd"),
+                (b"FreeBSD", b"aarch64") => Some("aarch64-unknown-freebsd"),
+                (b"OpenBSD", b"x86_64") => Some("x86_64-unknown-openbsd"),
+                (b"OpenBSD", b"i686") => Some("i686-unknown-openbsd"),
+                (b"NetBSD", b"x86_64") => Some("x86_64-unknown-netbsd"),
+                (b"NetBSD", b"i686") => Some("i686-unknown-netbsd"),
+                (b"DragonFly", b"x86_64") => Some("x86_64-unknown-dragonfly"),
+                #[cfg(target_os = "illumos")]
+                (b"SunOS", b"i86pc") => Some("x86_64-unknown-illumos"),
+                #[cfg(target_os = "solaris")]
+                (b"SunOS", b"i86pc") => Some("x86_64-pc-solaris"),
+                (b"SunOS", b"sun4v") => Some("sparcv9-sun-solaris"),
+                _ => None,
+            };
+
+            #[cfg(target_os = "android")]
+            let host_tuple = match (sysname, machine) {
+                (_, b"arm") => Some("arm-linux-androideabi"),
+                (_, b"armv7l") => Some("armv7-linux-androideabi"),
+                (_, b"armv8l") => Some("armv7-linux-androideabi"),
+                (_, b"aarch64") => Some("aarch64-linux-android"),
+                (_, b"i686") => Some("i686-linux-android"),
+                (_, b"x86_64") => Some("x86_64-linux-android"),
+                _ => None,
+            };
+
+            host_tuple.map(TargetTuple::new)
+        }
+
+        if let Ok(tuple) = process.var("RUSTUP_OVERRIDE_HOST_TUPLE") {
+            Some(Self(tuple))
+        } else if let Ok(tuple) = process.var("RUSTUP_OVERRIDE_HOST_TRIPLE") {
+            Some(Self(tuple))
+        } else {
+            inner()
+        }
+    }
+
+    pub(crate) fn from_host_or_build(process: &Process) -> Self {
+        Self::from_host(process).unwrap_or_else(Self::from_build)
+    }
+
+    pub(crate) fn can_run(&self, other: &Self) -> anyhow::Result<bool> {
+        // Most trivial shortcut of all
+        if self == other {
+            return Ok(true);
+        }
+        // Otherwise we need to parse things
+        let partial_self = PartialTargetTuple::new(&self.0)
+            .ok_or_else(|| anyhow!(format!("Unable to parse target tuple: {}", self.0)))?;
+        let partial_other = PartialTargetTuple::new(&other.0)
+            .ok_or_else(|| anyhow!(format!("Unable to parse target tuple: {}", other.0)))?;
+        // First obvious check is OS, if that doesn't match there's no chance
+        let ret = if partial_self.os != partial_other.os {
+            false
+        } else if partial_self.os.as_deref() == Some("pc-windows") {
+            // Windows is a special case here: we can run gnu and msvc on the same system.
+            partial_self.arch == partial_other.arch
+        } else {
+            // For other OSes, for now, we assume other toolchains won't run
+            false
+        };
+        Ok(ret)
+    }
+}
+
+impl From<String> for TargetTuple {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl fmt::Display for TargetTuple {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Deref for TargetTuple {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+// Linux hosts don't indicate clib in uname, however binaries only
+// run on boxes with the same clib, as expected.
+#[cfg(all(not(windows), not(target_env = "musl")))]
+const TUPLE_X86_64_UNKNOWN_LINUX: &str = "x86_64-unknown-linux-gnu";
+#[cfg(all(not(windows), target_env = "musl"))]
+const TUPLE_X86_64_UNKNOWN_LINUX: &str = "x86_64-unknown-linux-musl";
+#[cfg(all(not(windows), not(target_env = "musl")))]
+const TUPLE_AARCH64_UNKNOWN_LINUX: &str = "aarch64-unknown-linux-gnu";
+#[cfg(all(not(windows), target_env = "musl"))]
+const TUPLE_AARCH64_UNKNOWN_LINUX: &str = "aarch64-unknown-linux-musl";
+#[cfg(all(not(windows), not(target_env = "musl")))]
+const TUPLE_LOONGARCH64_UNKNOWN_LINUX: &str = "loongarch64-unknown-linux-gnu";
+#[cfg(all(not(windows), target_env = "musl"))]
+const TUPLE_LOONGARCH64_UNKNOWN_LINUX: &str = "loongarch64-unknown-linux-musl";
+#[cfg(all(not(windows), not(target_env = "musl")))]
+const TUPLE_POWERPC64_UNKNOWN_LINUX: &str = "powerpc64-unknown-linux-gnu";
+#[cfg(all(not(windows), target_env = "musl"))]
+const TUPLE_POWERPC64_UNKNOWN_LINUX: &str = "powerpc64-unknown-linux-musl";
+#[cfg(all(not(windows), not(target_env = "musl")))]
+const TUPLE_POWERPC64LE_UNKNOWN_LINUX: &str = "powerpc64le-unknown-linux-gnu";
+#[cfg(all(not(windows), target_env = "musl"))]
+const TUPLE_POWERPC64LE_UNKNOWN_LINUX: &str = "powerpc64le-unknown-linux-musl";
+#[cfg(all(not(windows), not(target_env = "musl")))]
+const TUPLE_RISCV64GC_UNKNOWN_LINUX: &str = "riscv64gc-unknown-linux-gnu";
+#[cfg(all(not(windows), target_env = "musl"))]
+const TUPLE_RISCV64GC_UNKNOWN_LINUX: &str = "riscv64gc-unknown-linux-musl";
+
+// MIPS platforms don't indicate endianness in uname, however binaries only
+// run on boxes with the same endianness, as expected.
+// Hence we could distinguish between the variants with compile-time cfg()
+// attributes alone.
+#[cfg(all(not(windows), target_endian = "big"))]
+static TUPLE_MIPS_UNKNOWN_LINUX_GNU: &str = "mips-unknown-linux-gnu";
+#[cfg(all(not(windows), target_endian = "little"))]
+static TUPLE_MIPS_UNKNOWN_LINUX_GNU: &str = "mipsel-unknown-linux-gnu";
+
+#[cfg(all(not(windows), target_endian = "big"))]
+static TUPLE_MIPS64_UNKNOWN_LINUX_GNUABI64: &str = "mips64-unknown-linux-gnuabi64";
+#[cfg(all(not(windows), target_endian = "little"))]
+static TUPLE_MIPS64_UNKNOWN_LINUX_GNUABI64: &str = "mips64el-unknown-linux-gnuabi64";
+
+/// Check if /bin/sh is a 32-bit binary. If it doesn't exist, fall back to
+/// checking if _we_ are a 32-bit binary.
+/// rustup-init.sh also relies on checking /bin/sh for bitness.
+#[cfg(not(windows))]
+fn is_32bit_userspace() -> bool {
+    use std::{
+        fs,
+        io::{self, Read},
+    };
+
+    // inner function is to simplify error handling.
+    fn inner() -> io::Result<bool> {
+        let mut f = fs::File::open("/bin/sh")?;
+        let mut buf = [0; 5];
+        f.read_exact(&mut buf)?;
+
+        // ELF files start out "\x7fELF", and the following byte is
+        //   0x01 for 32-bit and
+        //   0x02 for 64-bit.
+        Ok(&buf == b"\x7fELF\x01")
+    }
+
+    inner().unwrap_or(cfg!(target_pointer_width = "32"))
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize, PartialOrd, Ord,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum Profile {
+    Minimal,
+    #[default]
+    Default,
+    Complete,
+}
+
+impl Profile {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Default => "default",
+            Self::Complete => "complete",
+        }
+    }
+}
+
+impl ValueEnum for Profile {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[Self::Minimal, Self::Default, Self::Complete]
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        Some(PossibleValue::new(self.as_str()))
+    }
+
+    fn from_str(input: &str, _: bool) -> Result<Self, String> {
+        <Self as FromStr>::from_str(input).map_err(|e| e.to_string())
+    }
+}
+
+impl FromStr for Profile {
+    type Err = anyhow::Error;
+
+    fn from_str(name: &str) -> anyhow::Result<Self> {
+        match name {
+            "minimal" | "m" => Ok(Self::Minimal),
+            "default" | "d" | "" => Ok(Self::Default),
+            "complete" | "c" => Ok(Self::Complete),
+            _ => Err(anyhow!(format!(
+                "unknown profile name: '{}'; valid profile names are: {}",
+                name,
+                Self::value_variants().iter().join(", ")
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for Profile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Switch {
+    #[default]
+    Enable,
+    Disable,
+}
+
+impl Switch {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Enable => "enable",
+            Self::Disable => "disable",
+        }
+    }
+}
+
+impl ValueEnum for Switch {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[Self::Enable, Self::Disable]
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        Some(PossibleValue::new(self.as_str()))
+    }
+
+    fn from_str(input: &str, _: bool) -> Result<Self, String> {
+        <Self as FromStr>::from_str(input).map_err(|e| e.to_string())
+    }
+}
+
+impl FromStr for Switch {
+    type Err = anyhow::Error;
+
+    fn from_str(mode: &str) -> anyhow::Result<Self> {
+        match mode {
+            "enable" => Ok(Self::Enable),
+            "disable" => Ok(Self::Disable),
+            _ => Err(anyhow!(format!(
+                "unknown mode: '{}'; valid modes are {}",
+                mode,
+                Self::value_variants().iter().join(", ")
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for Switch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+pub(crate) struct DistOptions<'cfg, 'a> {
+    pub(super) cfg: &'cfg Cfg<'cfg>,
+    pub(super) toolchain: &'a ChannelToolchainName,
+    profile: Profile,
+    pub(super) update_hash: PathBuf,
+    dl_cfg: DownloadCfg<'cfg>,
+    /// --force bool is whether to force an update/install
+    pub(super) force: bool,
+    /// --allow-downgrade
+    pub(super) allow_downgrade: bool,
+    /// toolchain already exists
+    pub(super) exists: bool,
+    /// currently installed date and version
+    pub(super) old_date_version: Option<(String, String)>,
+    /// Extra components to install from dist
+    components: &'a [&'a str],
+    /// Extra targets to install from dist
+    targets: &'a [&'a str],
+}
+
+impl<'cfg, 'a> DistOptions<'cfg, 'a> {
+    pub(super) fn new(
+        components: &'a [&'a str],
+        targets: &'a [&'a str],
+        toolchain: &'a ChannelToolchainName,
+        profile: Profile,
+        force: bool,
+        cfg: &'cfg Cfg<'cfg>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            cfg,
+            toolchain,
+            profile,
+            update_hash: cfg.get_hash_file(toolchain, true)?,
+            dl_cfg: DownloadCfg::new(cfg),
+            force,
+            allow_downgrade: false,
+            exists: false,
+            old_date_version: None,
+            components,
+            targets,
+        })
+    }
+
+    pub(super) fn for_update(
+        mut self,
+        toolchain: &'a ChannelToolchain<'cfg>,
+        allow_downgrade: bool,
+    ) -> Self {
+        self.allow_downgrade = allow_downgrade;
+        self.exists = true;
+        self.old_date_version =
+            // Ignore a missing manifest: we can't report the old version
+            // correctly, and it probably indicates an incomplete install, so do
+            // not report an old rustc version either.
+            toolchain.get_manifest()
+                .map(|m| {
+                    (
+                        m.date,
+                        // should rustc_version be a free function on a trait?
+                        // note that prev_version can be junk if the rustc component is missing ...
+                        toolchain.toolchain.rustc_version(),
+                    )
+                })
+                .ok();
+
+        self
+    }
+
+    // Installs or updates a toolchain from a dist server. If an initial
+    // install then it will be installed with the default components. If
+    // an upgrade then all the existing components will be upgraded.
+    //
+    // Returns the manifest's hash if anything changed.
+    #[tracing::instrument(level = "trace", err(level = "trace"), skip_all, fields(profile = ?self.profile, prefix = %prefix.path().display()))]
+    pub(crate) async fn install_into(
+        &self,
+        prefix: &InstallPrefix,
+        mut prefetched_manifest: Option<ManifestWithHash>,
+    ) -> anyhow::Result<Option<String>> {
+        let fresh_install = !prefix.path().exists();
+        // fresh_install means the toolchain isn't present, but hash_exists means there is a stray hash file
+        if fresh_install && self.update_hash.exists() {
+            warn!(
+                "removing stray hash file in order to continue: {}",
+                self.update_hash.display()
+            );
+            std::fs::remove_file(&self.update_hash)?;
+        }
+
+        let mut first_err = None;
+        let backtrack = self.toolchain.channel == Channel::Nightly && self.toolchain.date.is_none();
+        // We want to limit backtracking if we do not already have a toolchain
+        let mut backtrack_limit: Option<i32> = if self.toolchain.date.is_some() {
+            None
+        } else {
+            // We limit the backtracking to 21 days by default (half a release cycle).
+            // The limit of 21 days is an arbitrary selection, so we let the user override it.
+            const BACKTRACK_LIMIT_DEFAULT: i32 = 21;
+            let provided = self
+                .dl_cfg
+                .process
+                .var("RUSTUP_BACKTRACK_LIMIT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(BACKTRACK_LIMIT_DEFAULT);
+            Some(if provided < 1 { 1 } else { provided })
+        };
+
+        // In case there is no allow-downgrade option set
+        // we never want to backtrack further back than the nightly that's already installed.
+        //
+        // If no nightly is installed, it makes no sense to backtrack beyond the first ever manifest,
+        // which is 2014-12-20 according to
+        // https://static.rust-lang.org/cargo-dist/index.html.
+        //
+        // We could arguably use the date of the first rustup release here, but that would break a
+        // bunch of the tests, which (inexplicably) use 2015-01-01 as their manifest dates.
+        let first_manifest = date_from_manifest_date("2014-12-20").unwrap();
+        let old_manifest = self
+            .old_date_version
+            .as_ref()
+            .and_then(|(d, _)| date_from_manifest_date(d))
+            .unwrap_or(first_manifest);
+        let last_manifest = if self.allow_downgrade {
+            first_manifest
+        } else {
+            old_manifest
+        };
+
+        let current_manifest = {
+            let manifestation = Manifestation::open(prefix.clone(), self.toolchain.target.clone())?;
+            manifestation.load_manifest()?
+        };
+
+        let mut toolchain = self.toolchain.clone();
+        let res = loop {
+            // TODO: Add a notification about which manifest version is going to be used
+            info!("syncing channel updates for {toolchain}");
+            let manifest_result = match prefetched_manifest.take() {
+                Some(manifest) => Ok(Some(manifest)),
+                None => self.dl_v2_manifest(prefix, &toolchain).await,
+            };
+
+            let try_date_str = match (&toolchain.date, &manifest_result) {
+                (Some(date), _) => Some(date),
+                (None, Ok(Some(m))) => Some(&m.manifest.date),
+                _ => None,
+            };
+
+            let try_date = match try_date_str {
+                Some(s) if let Some(d) = date_from_manifest_date(s) => Ok(d),
+                // Parsing error can only be a problem if we enter backtracking, so we delay the
+                // error until we actually need to try another date.
+                Some(s) => Err(format!("malformed manifest date `{s}`")),
+                None => Err(format!(
+                    "manifest date not found for toolchain `{toolchain}`"
+                )),
+            };
+
+            // Skip installation when the toolchain to be installed comes with a valid manifest date
+            // that is older than the oldest acceptable date.
+            if try_date.as_ref().is_ok_and(|date| date < &last_manifest) {
+                break match first_err {
+                    // Wouldn't be an update if we go further back than the currently installed toolchain.
+                    Some(e) => Err(e),
+                    // In this case, all newer nightlies are missing, which means there are no
+                    // updates, so the user is already at the latest nightly.
+                    None => Ok(None),
+                };
+            }
+
+            let result = self
+                .try_update(Some(&toolchain), prefix, manifest_result)
+                .await;
+            let e = match result {
+                Ok(v) => break Ok(v),
+                Err(e) if !backtrack => break Err(e),
+                Err(e) => e,
+            };
+
+            let cause = e.downcast_ref::<DistError>();
+            match cause {
+                Some(DistError::ToolchainComponentsMissing(components, manifest, ..)) => {
+                    let plural = if components.len() > 1 { "s" } else { "" };
+                    let manifest = current_manifest.as_ref().unwrap_or(manifest);
+                    let components = components
+                        .iter()
+                        .map(|component| {
+                            match component.target.as_ref() == Some(&toolchain.target) {
+                                true => manifest.short_name(component).to_owned(),
+                                false => manifest.name(component),
+                            }
+                        })
+                        .join(", ");
+                    info!("skipping nightly with missing component{plural}: {components}");
+
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                    // We decrement the backtrack count only on unavailable component errors
+                    // so that the limit only applies to nightlies that were indeed available,
+                    // and ignores missing ones.
+                    backtrack_limit = backtrack_limit.map(|n| n - 1);
+                }
+
+                Some(e @ DistError::HostTupleUnsupported(_)) => {
+                    info!("skipping nightly with unsupported host: {e:#}")
+                }
+
+                // no need to even print anything for missing nightlies,
+                // since we don't really "skip" them
+                Some(DistError::MissingReleaseForToolchain(..)) => (),
+
+                // All other errors break the loop
+                _ => break Err(e),
+            };
+
+            if let Some(backtrack_limit) = backtrack_limit
+                && backtrack_limit < 1
+            {
+                // This unwrap is safe because we can only hit this if we've
+                // had a chance to set first_err
+                break Err(first_err.unwrap());
+            }
+
+            // The user asked to update their nightly, but the latest nightly does not have all
+            // the components that the user currently has installed. Let's try the previous
+            // nightlies in reverse chronological order until we find a nightly that does,
+            // starting at one date earlier than the current manifest's date.
+            let try_next = try_date
+                .unwrap_or_else(|e| panic!("{e}"))
+                .pred_opt()
+                .unwrap();
+            toolchain.date = Some(try_next.format("%Y-%m-%d").to_string());
+        };
+
+        // Don't leave behind an empty / broken installation directory
+        if res.is_err() && fresh_install {
+            // FIXME Ignoring cascading errors
+            let _ = utils::remove_dir("toolchain", prefix.path());
+        }
+
+        res
+    }
+
+    pub(crate) async fn try_update(
+        &self,
+        toolchain: Option<&ChannelToolchainName>,
+        prefix: &InstallPrefix,
+        manifest_result: anyhow::Result<Option<ManifestWithHash>>,
+    ) -> anyhow::Result<Option<String>> {
+        let download = &self.dl_cfg;
+        let toolchain = toolchain.unwrap_or(self.toolchain);
+        let manifestation = Manifestation::open(prefix.clone(), toolchain.target.clone())?;
+
+        match manifest_result {
+            Ok(Some(ManifestWithHash { manifest: m, hash })) => {
+                match m.get_rust_version() {
+                    Ok(version) => info!("latest update on {} for version {version}", m.date),
+                    Err(_) => info!("latest update on {}", m.date),
+                }
+
+                let profile_components = match self.exists {
+                    true => Vec::new(),
+                    false => m.get_profile_components(self.profile, &toolchain.target)?,
+                };
+
+                let mut all_components: HashSet<Component> =
+                    profile_components.into_iter().collect();
+
+                let rust_package = m.get_package("rust")?;
+                let rust_target_package =
+                    rust_package.get_target(Some(&toolchain.target.clone()))?;
+
+                for &component in self.components {
+                    let mut component = Component::new(
+                        component.to_string(),
+                        Some(toolchain.target.clone()),
+                        false,
+                    );
+                    if let Some(renamed) = m.rename_component(&component) {
+                        component = renamed;
+                    }
+                    // Look up the newly constructed/renamed component and ensure that
+                    // if it's a wildcard component we note such, otherwise we end up
+                    // exacerbating the problem we thought we'd fixed with #2087 and #2115
+                    if let Some(c) = rust_target_package
+                        .components
+                        .iter()
+                        .find(|c| c.short_name() == component.short_name())
+                        && c.target.is_none()
+                    {
+                        component = component.wildcard();
+                    }
+                    all_components.insert(component);
+                }
+
+                for &target in self.targets {
+                    let tuple = TargetTuple::new(target);
+                    all_components.insert(Component::std(tuple));
+                }
+
+                let mut explicit_add_components: Vec<_> = all_components.into_iter().collect();
+                explicit_add_components.sort();
+
+                let changes = Changes {
+                    explicit_add_components,
+                    remove_components: Vec::new(),
+                };
+                return match manifestation
+                    .update(m, changes, self.force, download, toolchain, true)
+                    .await
+                {
+                    Ok(status) => match status {
+                        UpdateStatus::Unchanged => Ok(None),
+                        UpdateStatus::Changed => Ok(Some(hash)),
+                    },
+                    // Check for the variant by reference before we downcast with ownership,
+                    // otherwise we'll drop implicit context bundled up in the original anyhow::Error.
+                    Err(err) => match err.downcast_ref::<RustupError>() {
+                        Some(RustupError::RequestedComponentsUnavailable { .. }) => {
+                            let Ok(RustupError::RequestedComponentsUnavailable {
+                                components,
+                                manifest,
+                                toolchain,
+                            }) = err.downcast::<RustupError>()
+                            else {
+                                unreachable!()
+                            };
+
+                            Err(anyhow!(DistError::ToolchainComponentsMissing(
+                                components, manifest, toolchain,
+                            )))
+                        }
+                        Some(_) | None => Err(err),
+                    },
+                };
+            }
+            Ok(None) => return Ok(None),
+            Err(err) => {
+                match err.downcast_ref::<RustupError>() {
+                    Some(RustupError::DownloadNotExists { .. }) => {
+                        // Proceed to try v1 as a fallback
+                        debug!("manifest not found; trying legacy manifest");
+                    }
+                    // Includes `ChecksumFailed`: if the v2 manifest exists but its
+                    // contents do not match the published `.sha256`, surface the
+                    // integrity failure as an error rather than silently treating
+                    // the toolchain as up to date. The v1 fallback path below
+                    // already does the same.
+                    _ => return Err(err),
+                }
+            }
+        }
+
+        // If the v2 manifest is not found then try v1
+        let manifest = download
+            .dl_v1_manifest(&self.cfg.dist_root_url, toolchain)
+            .await
+            .map_err(|err| match err.downcast_ref::<RustupError>() {
+                Some(RustupError::ChecksumFailed { .. }) => err,
+                Some(RustupError::DownloadNotExists { .. }) => {
+                    DistError::MissingReleaseForToolchain(toolchain.manifest_name()).into()
+                }
+                _ => err.context(format!(
+                    "failed to download manifest for '{}'",
+                    toolchain.manifest_name()
+                )),
+            })?;
+
+        let result = manifestation
+            .update_v1(&manifest, &self.update_hash, download)
+            .await;
+
+        // inspect, determine what context to add, then process afterwards.
+        if let Err(e) = &result
+            && let Some(RustupError::DownloadNotExists { .. }) = e.downcast_ref::<RustupError>()
+        {
+            return result.with_context(|| {
+                format!("could not download nonexistent rust version `{toolchain}`")
+            });
+        }
+
+        result
+    }
+
+    pub(crate) async fn dl_v2_manifest(
+        &self,
+        prefix: &InstallPrefix,
+        toolchain: &ChannelToolchainName,
+    ) -> anyhow::Result<Option<ManifestWithHash>> {
+        self.dl_cfg
+            .dl_v2_manifest(
+                // Skip the update hash when the installed manifest is missing or when components
+                // or targets were requested, since either case still requires the channel manifest.
+                (prefix.dist_manifest().is_some()
+                    && self.components.is_empty()
+                    && self.targets.is_empty())
+                .then_some(&self.update_hash),
+                toolchain,
+                self.cfg,
+            )
+            .await
+    }
+}
+
+fn date_from_manifest_date(date_str: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn test_parsed_toolchain_desc_parse() {
+        let success_cases = vec![
+            ("nightly", ("nightly", None, None)),
+            ("beta", ("beta", None, None)),
+            ("stable", ("stable", None, None)),
+            ("0.0", ("0.0", None, None)),
+            ("0.0.0", ("0.0.0", None, None)),
+            ("0.0.0--", ("0.0.0", None, Some("-"))), // possibly a bug?
+            ("9.999.99", ("9.999.99", None, None)),
+            ("0.0.0-anything", ("0.0.0", None, Some("anything"))),
+            ("0.0.0-0000-00-00", ("0.0.0", Some("0000-00-00"), None)),
+            // possibly unexpected behavior, if someone typos a date?
+            (
+                "0.0.0-00000-000-000",
+                ("0.0.0", None, Some("00000-000-000")),
+            ),
+            // possibly unexpected behavior, if someone forgets to add target after the hyphen?
+            ("0.0.0-0000-00-00-", ("0.0.0", None, Some("0000-00-00-"))),
+            (
+                "0.0.0-0000-00-00-any-other-thing",
+                ("0.0.0", Some("0000-00-00"), Some("any-other-thing")),
+            ),
+            // special hardcoded cases that only have v1 manifests
+            ("1.0", ("1.0.0", None, None)),
+            ("1.1", ("1.1.0", None, None)),
+            ("1.2", ("1.2.0", None, None)),
+            ("1.3", ("1.3.0", None, None)),
+            ("1.4", ("1.4.0", None, None)),
+            ("1.5", ("1.5.0", None, None)),
+            ("1.6", ("1.6.0", None, None)),
+            ("1.7", ("1.7.0", None, None)),
+            ("1.8", ("1.8.0", None, None)),
+            // channels with beta tags
+            ("0.0.0-beta", ("0.0.0-beta", None, None)),
+            ("0.0.0-beta.1", ("0.0.0-beta.1", None, None)),
+            (
+                "0.0.0-beta.1-0000-00-00",
+                ("0.0.0-beta.1", Some("0000-00-00"), None),
+            ),
+            (
+                "0.0.0-beta.1-anything",
+                ("0.0.0-beta.1", None, Some("anything")),
+            ),
+            (
+                "0.0.0-beta-anything",
+                ("0.0.0-beta", None, Some("anything")),
+            ),
+            (
+                "0.0.0-beta.1-0000-00-00-any-other-thing",
+                ("0.0.0-beta.1", Some("0000-00-00"), Some("any-other-thing")),
+            ),
+        ];
+
+        for (input, (channel, date, target)) in success_cases {
+            let parsed = input.parse::<ParsedChannelToolchainName>();
+            assert!(
+                parsed.is_ok(),
+                "expected parsing of `{input}` to succeed: {parsed:?}"
+            );
+
+            let expected = ParsedChannelToolchainName {
+                channel: Channel::from_str(channel).unwrap(),
+                date: date.map(String::from),
+                target: target.map(String::from),
+            };
+            assert_eq!(parsed.unwrap(), expected, "input: `{input}`");
+        }
+
+        let failure_cases = vec![
+            "anything",
+            "00.0000.000",
+            "3",
+            "",
+            "--",
+            "0.0.0-",
+            "1.90.01",
+        ];
+
+        for input in failure_cases {
+            let parsed = input.parse::<ParsedChannelToolchainName>();
+            assert!(
+                parsed.is_err(),
+                "expected parsing of `{input}` to fail: {parsed:?}"
+            );
+
+            let error_message = format!("invalid toolchain name: '{input}'");
+
+            assert_eq!(
+                parsed.unwrap_err().to_string(),
+                error_message,
+                "input: `{input}`"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tracking_channels() {
+        static CASES: &[(&str, bool)] = &[
+            ("stable", true),
+            ("beta", true),
+            ("nightly", true),
+            ("nightly-2020-10-04", false),
+            ("1.48", true),
+            ("1.47.0", false),
+            ("1.23-beta", true),
+            ("1.23.0-beta", true),
+            ("1.23.0-beta.2", false),
+        ];
+        for case in CASES {
+            let full_tcn = format!("{}-x86_64-unknown-linux-gnu", case.0);
+            let tcd = ChannelToolchainName::from_str(&full_tcn).unwrap();
+            eprintln!("Considering {}", case.0);
+            assert_eq!(tcd.is_tracking(), case.1);
+        }
+    }
+
+    #[test]
+    fn partial_version_from_str() -> anyhow::Result<()> {
+        assert_eq!(
+            PartialVersion::from_str("0.12")?,
+            PartialVersion {
+                major: 0,
+                minor: Some(12),
+                patch: None,
+                pre: semver::Prerelease::EMPTY,
+            },
+        );
+        assert_eq!(
+            PartialVersion::from_str("1.23-beta")?,
+            PartialVersion {
+                major: 1,
+                minor: Some(23),
+                patch: None,
+                pre: semver::Prerelease::new("beta").unwrap(),
+            },
+        );
+        assert_eq!(
+            PartialVersion::from_str("1.23.0-beta.4")?,
+            PartialVersion {
+                major: 1,
+                minor: Some(23),
+                patch: Some(0),
+                pre: semver::Prerelease::new("beta.4").unwrap(),
+            },
+        );
+
+        assert!(PartialVersion::from_str("1.01").is_err()); // no leading zeros
+        assert!(PartialVersion::from_str("^1.23").is_err()); // no comparing operators
+        assert!(PartialVersion::from_str(">=1").is_err());
+        assert!(PartialVersion::from_str("*").is_err());
+        assert!(PartialVersion::from_str("stable").is_err());
+
+        Ok(())
+    }
+
+    proptest! {
+        #[test]
+        fn partial_version_from_str_to_str(
+            ver in r"[0-9]{1}(\.(0|[1-9][0-9]{0,2}))(\.(0|[1-9][0-9]{0,1}))?(-beta(\.(0|[1-9][1-9]{0,1}))?)?"
+        ) {
+            prop_assert_eq!(PartialVersion::from_str(&ver).unwrap().to_string(), ver);
+        }
+    }
+
+    #[test]
+    fn compatible_host_tuples() {
+        static CASES: &[(&str, &[&str], &[&str])] = &[
+            (
+                // 64bit linux
+                "x86_64-unknown-linux-gnu",
+                // Not compatible beyond itself
+                &[],
+                // Even 32bit linux is considered not compatible by default
+                &["i686-unknown-linux-gnu"],
+            ),
+            (
+                // On the other hand, Windows msvc
+                "x86_64-pc-windows-msvc",
+                // is compatible with Windows gnu
+                &["x86_64-pc-windows-gnu"],
+                // But is not compatible with Linux
+                &[
+                    "x86_64-unknown-linux-gnu",
+                    // or 32-bit Windows
+                    "i686-pc-windows-msvc",
+                    "i686-pc-windows-gnu",
+                ],
+            ),
+            (
+                // And the Windows gnu toolchain
+                "x86_64-pc-windows-gnu",
+                // is compatible with Windows msvc
+                &["x86_64-pc-windows-msvc"],
+                // But is not compatible with Linux despite also being gnu
+                &[
+                    "x86_64-unknown-linux-gnu",
+                    // And is not compatible with 32-bit Windows
+                    "i686-pc-windows-msvc",
+                    "i686-pc-windows-gnu",
+                ],
+            ),
+            (
+                // 32bit Windows is not expected to be able to run
+                // 64bit windows
+                "i686-pc-windows-msvc",
+                &["i686-pc-windows-gnu"],
+                &["x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu"],
+            ),
+        ];
+
+        for &(host, compatible, incompatible) in CASES {
+            println!("host={host}");
+            let host = TargetTuple::new(host);
+            assert!(host.can_run(&host).unwrap(), "host wasn't self-compatible");
+            for &other in compatible.iter() {
+                println!("compatible with {other}");
+                let other = TargetTuple::new(other);
+                assert!(
+                    host.can_run(&other).unwrap(),
+                    "host and other were unexpectedly incompatible"
+                );
+            }
+            for &other in incompatible.iter() {
+                println!("incompatible with {other}");
+                let other = TargetTuple::new(other);
+                assert!(
+                    !host.can_run(&other).unwrap(),
+                    "host and other were unexpectedly compatible"
+                );
+            }
+        }
+    }
+}

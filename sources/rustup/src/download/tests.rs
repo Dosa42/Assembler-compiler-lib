@@ -1,0 +1,368 @@
+use std::{
+    convert::Infallible,
+    env::remove_var,
+    fs, io,
+    net::{SocketAddr, TcpListener},
+    path::Path,
+    sync::{
+        LazyLock,
+        mpsc::{Sender, channel},
+    },
+    thread,
+};
+
+use http_body_util::Full;
+use hyper::{Request, body::Bytes, server::conn::http1, service::service_fn};
+use tempfile::TempDir;
+
+#[cfg(any(feature = "reqwest-rustls-tls", feature = "reqwest-native-tls"))]
+mod reqwest {
+    use std::{
+        env::set_var,
+        error::Error,
+        net::TcpListener,
+        sync::atomic::{AtomicUsize, Ordering},
+        thread,
+        time::Duration,
+    };
+
+    use env_proxy::for_url;
+    use reqwest::{Client, Proxy};
+    use url::Url;
+
+    use super::{scrub_env, serve_file, serve_truncated, tmp_dir, write_file};
+    use crate::download::{DownloadOptions, Tls};
+
+    const OPTIONS: DownloadOptions = DownloadOptions {
+        tls: DOWNLOAD_BACKEND,
+        timeout: Duration::from_secs(180),
+    };
+
+    #[cfg(feature = "reqwest-rustls-tls")]
+    const DOWNLOAD_BACKEND: Tls = Tls::Rustls;
+
+    #[cfg(all(not(feature = "reqwest-rustls-tls"), feature = "reqwest-native-tls"))]
+    const DOWNLOAD_BACKEND: Tls = Tls::NativeTls;
+
+    // Tests for correctly retrieving the proxy (host, port) tuple from $https_proxy
+    #[tokio::test]
+    async fn read_basic_proxy_params() {
+        let _guard = scrub_env().await;
+        // SAFETY: We are setting environment variables when `SERIALISE_TESTS` is locked,
+        // and those environment variables in question are not relevant elsewhere in the test suite.
+        unsafe {
+            set_var("https_proxy", "http://proxy.example.com:8080");
+        }
+        let u = Url::parse("https://www.example.org").ok().unwrap();
+        assert_eq!(
+            for_url(&u).host_port(),
+            Some(("proxy.example.com".to_string(), 8080))
+        );
+    }
+
+    // Tests to verify if socks feature is available and being used
+    #[tokio::test]
+    async fn socks_proxy_request() {
+        static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+        let _guard = scrub_env().await;
+
+        // SAFETY: We are setting environment variables when `SERIALISE_TESTS` is locked,
+        // and those environment variables in question are not relevant elsewhere in the test suite.
+        unsafe {
+            set_var("all_proxy", "socks5://127.0.0.1:1080");
+        }
+
+        thread::spawn(move || {
+            let listener = TcpListener::bind("127.0.0.1:1080").unwrap();
+            let incoming = listener.incoming();
+            for _ in incoming {
+                CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        let env_proxy = |url: &Url| for_url(url).to_url();
+        let url = Url::parse("http://192.168.0.1/").unwrap();
+
+        let client = Client::builder()
+            // HACK: set `pool_max_idle_per_host` to `0` to avoid an issue in the underlying
+            // `hyper` library that causes the `reqwest` client to hang in some cases.
+            // See <https://github.com/hyperium/hyper/issues/2312> for more details.
+            .pool_max_idle_per_host(0)
+            .proxy(Proxy::custom(env_proxy))
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let res = client.get(url.as_str()).send().await;
+
+        if let Err(e) = res {
+            let s = e.source().unwrap();
+            assert!(
+                s.to_string().contains("client error (Connect)"),
+                "Expected socks connect error, got: {s}",
+            );
+            assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 1);
+        } else {
+            panic!("Socks proxy was ignored")
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_partial_from_file_url() {
+        let tmpdir = tmp_dir();
+        let from_path = tmpdir.path().join("download-source");
+        write_file(&from_path, "xxx45");
+
+        let target_path = tmpdir.path().join("downloaded");
+        write_file(&target_path, "123");
+
+        let from_url = Url::from_file_path(&from_path).unwrap();
+        OPTIONS
+            .start(&from_url, &target_path)
+            .with_resume()
+            .download()
+            .await
+            .expect("Test download failed");
+
+        assert_eq!(std::fs::read_to_string(&target_path).unwrap(), "12345");
+    }
+
+    #[tokio::test]
+    async fn resume_partial_fails_if_server_ignores_range() {
+        let _guard = scrub_env().await;
+        let tmpdir = tmp_dir();
+        let target_path = tmpdir.path().join("downloaded");
+        write_file(&target_path, "123");
+
+        let addr = serve_file(b"xxx45".to_vec(), false);
+        let from_url = format!("http://{addr}").parse().unwrap();
+
+        OPTIONS
+            .start(&from_url, &target_path)
+            .with_resume()
+            .download()
+            .await
+            .expect_err("download should fail if server ignores range");
+
+        assert!(
+            !target_path.exists(),
+            "partial file should have been deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn network_failure_does_not_delete_partial_file() {
+        let _guard = scrub_env().await;
+        let tmpdir = tmp_dir();
+        let target_path = tmpdir.path().join("downloaded.partial");
+        write_file(&target_path, "123");
+
+        let from_url = "http://240.0.0.0:1080".parse().unwrap();
+        DownloadOptions {
+            tls: DOWNLOAD_BACKEND,
+            timeout: Duration::from_secs(1),
+        }
+        .start(&from_url, &target_path)
+        .with_resume()
+        .download()
+        .await
+        .expect_err("download should fail with a connect error");
+
+        assert!(target_path.exists(), "partial file should not be deleted");
+        assert_eq!(std::fs::read_to_string(&target_path).unwrap(), "123");
+    }
+
+    #[tokio::test]
+    async fn interrupted_download_resumes_from_partial_file() {
+        let _guard = scrub_env().await;
+        let tmpdir = tmp_dir();
+        let target_path = tmpdir.path().join("downloaded.partial");
+
+        let addr = serve_truncated(b"123".to_vec(), 5);
+        let from_url = format!("http://{addr}").parse().unwrap();
+        OPTIONS
+            .start(&from_url, &target_path)
+            .with_resume()
+            .download()
+            .await
+            .expect_err("download should fail if the body is cut short");
+
+        assert_eq!(std::fs::read_to_string(&target_path).unwrap(), "123");
+
+        let addr = serve_file(b"12345".to_vec(), true);
+        let from_url = format!("http://{addr}").parse().unwrap();
+        OPTIONS
+            .start(&from_url, &target_path)
+            .with_resume()
+            .download()
+            .await
+            .expect("resumed download should succeed");
+
+        assert_eq!(std::fs::read_to_string(&target_path).unwrap(), "12345");
+    }
+}
+
+pub fn tmp_dir() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("rustup-download-test-")
+        .tempdir()
+        .expect("creating tempdir for test")
+}
+
+pub fn write_file(path: &Path, contents: &str) {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(path)
+        .expect("writing test data");
+
+    io::Write::write_all(&mut file, contents.as_bytes()).expect("writing test data");
+
+    file.sync_data().expect("writing test data");
+}
+
+// A dead simple hyper server implementation.
+// For more info, see:
+// https://hyper.rs/guides/1/server/hello-world/
+async fn run_server(
+    addr_tx: Sender<SocketAddr>,
+    addr: SocketAddr,
+    contents: Vec<u8>,
+    honor_range: bool,
+) {
+    let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+        let contents = contents.clone();
+        async move {
+            let res = serve_contents(req, contents, honor_range);
+            Ok::<_, Infallible>(res)
+        }
+    });
+
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .expect("can not bind");
+
+    let addr = listener.local_addr().unwrap();
+    addr_tx.send(addr).unwrap();
+
+    loop {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .expect("could not accept connection");
+        let io = hyper_util::rt::TokioIo::new(stream);
+
+        let svc = svc.clone();
+        tokio::spawn(async move {
+            if let Err(err) = http1::Builder::new().serve_connection(io, svc).await {
+                eprintln!("failed to serve connection: {err:?}");
+            }
+        });
+    }
+}
+
+pub fn serve_file(contents: Vec<u8>, honor_range: bool) -> SocketAddr {
+    let addr = ([127, 0, 0, 1], 0).into();
+    let (addr_tx, addr_rx) = channel();
+
+    thread::spawn(move || {
+        let server = run_server(addr_tx, addr, contents, honor_range);
+        let rt = tokio::runtime::Runtime::new().expect("could not creating Runtime");
+        rt.block_on(server);
+    });
+
+    let addr = addr_rx.recv();
+    addr.unwrap()
+}
+
+fn serve_contents(
+    req: Request<hyper::body::Incoming>,
+    contents: Vec<u8>,
+    honor_range: bool,
+) -> hyper::Response<Full<Bytes>> {
+    let mut range_header = None;
+    let (status, body) = if honor_range && let Some(range) = req.headers().get(hyper::header::RANGE)
+    {
+        // extract range "bytes={start}-"
+        let range = range.to_str().expect("unexpected Range header");
+        assert!(range.starts_with("bytes="));
+        let range = range.trim_start_matches("bytes=");
+        assert!(range.ends_with('-'));
+        let range = range.trim_end_matches('-');
+        assert_eq!(range.split('-').count(), 1);
+        let start: u64 = range.parse().expect("unexpected Range header");
+
+        range_header = Some(format!("bytes {}-{len}/{len}", start, len = contents.len()));
+        (
+            hyper::StatusCode::PARTIAL_CONTENT,
+            contents[start as usize..].to_vec(),
+        )
+    } else {
+        (hyper::StatusCode::OK, contents)
+    };
+
+    let mut res = hyper::Response::builder()
+        .status(status)
+        .header(hyper::header::CONTENT_LENGTH, body.len())
+        .body(Full::new(Bytes::from(body)))
+        .unwrap();
+    if let Some(range) = range_header {
+        res.headers_mut()
+            .insert(hyper::header::CONTENT_RANGE, range.parse().unwrap());
+    }
+    res
+}
+
+/// Serve a single response that announces `len` bytes, then closes the connection after `contents`
+pub fn serve_truncated(contents: Vec<u8>, len: usize) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("can not bind");
+    let addr = listener.local_addr().unwrap();
+
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("could not accept connection");
+        let mut request = Vec::new();
+        let mut buf = [0; 1024];
+        loop {
+            let n = io::Read::read(&mut stream, &mut buf).expect("could not read request");
+            request.extend_from_slice(&buf[..n]);
+            if n == 0 || request.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\n\r\n");
+        io::Write::write_all(&mut stream, head.as_bytes()).expect("could not write response");
+        io::Write::write_all(&mut stream, &contents).expect("could not write response");
+    });
+
+    addr
+}
+
+/// Clear proxy-related environment variables
+///
+/// Every test using a proxy-sensitive URL should call this and hold the returned guard,
+/// regardless of whether the test is going to set its own proxy environment variables.
+async fn scrub_env() -> tokio::sync::MutexGuard<'static, ()> {
+    static SERIALISE_TESTS: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    let guard = SERIALISE_TESTS.lock().await;
+
+    // SAFETY: We are clearing environment variables when `SERIALISE_TESTS` is locked, and those
+    // environment variables in question are only relevant in tests that continue to hold this
+    // mutex guard.
+    unsafe {
+        remove_var("http_proxy");
+        remove_var("HTTP_PROXY");
+        remove_var("https_proxy");
+        remove_var("HTTPS_PROXY");
+        remove_var("ftp_proxy");
+        remove_var("FTP_PROXY");
+        remove_var("all_proxy");
+        remove_var("ALL_PROXY");
+        remove_var("no_proxy");
+        remove_var("NO_PROXY");
+    }
+
+    guard
+}

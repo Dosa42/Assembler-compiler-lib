@@ -1,0 +1,289 @@
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    fmt,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
+
+use anyhow::Context;
+use same_file::Handle;
+use serde::{Deserialize, Serialize};
+use tracing::info;
+
+use crate::{
+    cli::self_update::SelfUpdateMode,
+    dist::{Profile, Switch},
+    errors::RustupError,
+    utils,
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettingsFile {
+    pub(crate) path: PathBuf,
+    cache: RefCell<Option<Settings>>,
+}
+
+impl SettingsFile {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            cache: RefCell::new(None),
+        }
+    }
+
+    fn write_settings(&self) -> anyhow::Result<()> {
+        let settings = self.cache.borrow();
+        utils::write_locked_file(
+            "settings",
+            &self.path,
+            &settings.as_ref().unwrap().stringify()?,
+        )?;
+        Ok(())
+    }
+
+    fn read_settings(&self) -> anyhow::Result<()> {
+        let b = self.cache.borrow();
+        if b.is_none() {
+            drop(b);
+            *self.cache.borrow_mut() = Some(if utils::is_file(&self.path) {
+                let content = utils::read_locked_file("settings", &self.path)?;
+                Settings::parse(&content).with_context(|| RustupError::ParsingFile {
+                    name: "settings",
+                    path: self.path.clone(),
+                })?
+            } else {
+                Settings::default()
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn with<T, F: FnOnce(&Settings) -> anyhow::Result<T>>(
+        &self,
+        f: F,
+    ) -> anyhow::Result<T> {
+        self.read_settings()?;
+
+        // Settings can no longer be None so it's OK to unwrap
+        f(self.cache.borrow().as_ref().unwrap())
+    }
+
+    pub(crate) fn with_mut<T, F: FnOnce(&mut Settings) -> anyhow::Result<T>>(
+        &self,
+        f: F,
+    ) -> anyhow::Result<T> {
+        self.read_settings()?;
+
+        // Settings can no longer be None so it's OK to unwrap
+        let result = { f(self.cache.borrow_mut().as_mut().unwrap())? };
+        self.write_settings()?;
+        Ok(result)
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Settings {
+    pub version: MetadataVersion,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "default_host_triple")]
+    pub default_host_tuple: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_toolchain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<Profile>,
+    #[serde(default)]
+    pub overrides: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pgp_keys: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_self_update: Option<SelfUpdateMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_install: Option<Switch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_hint: Option<Switch>,
+}
+
+impl Settings {
+    pub(crate) fn remove_override(&mut self, path: &Path) -> bool {
+        let mut removed = self.overrides.remove(&path.display().to_string()).is_some();
+        // The directory may also be stored under other paths that lead to it.
+        if let Ok(dir) = Handle::from_path(path) {
+            let count = self.overrides.len();
+            self.overrides.retain(|stored, _| !leads_to(stored, &dir));
+            removed |= self.overrides.len() < count;
+        }
+        removed
+    }
+
+    pub(crate) fn add_override(&mut self, path: &Path, toolchain: String) {
+        let key = path.display().to_string();
+        // Drop every entry stored for this directory under any path, so that
+        // the one inserted below under `key` is its only override.
+        if let Ok(dir) = Handle::from_path(path) {
+            self.overrides.retain(|stored, _| !leads_to(stored, &dir));
+        }
+        info!(
+            "override toolchain for {} set to {toolchain}",
+            path.display(),
+        );
+        self.overrides.insert(key, toolchain);
+    }
+
+    /// Indexes the overrides by the directories they refer to, for a series of lookups.
+    pub(crate) fn overrides_by_dir(&self) -> OverridesByDir<'_> {
+        let mut by_dir = HashMap::new();
+        for (path, toolchain) in &self.overrides {
+            // A directory that cannot be opened cannot be the current one either.
+            if let Ok(dir) = Handle::from_path(path) {
+                by_dir.entry(dir).or_insert_with(|| toolchain.as_str());
+            }
+        }
+        OverridesByDir { by_dir }
+    }
+
+    pub(crate) fn parse(data: &str) -> anyhow::Result<Self> {
+        toml::from_str(data).context("error parsing settings")
+    }
+
+    fn stringify(&self) -> anyhow::Result<String> {
+        Ok(toml::to_string(self)?)
+    }
+}
+
+/// Whether `path` leads to the directory behind `dir`.
+fn leads_to(path: &str, dir: &Handle) -> bool {
+    Handle::from_path(path).is_ok_and(|other| other == *dir)
+}
+
+/// Overrides keyed by the identity of their directories rather than by their
+/// paths, so that an override applies however its directory is reached.
+pub(crate) struct OverridesByDir<'a> {
+    by_dir: HashMap<Handle, &'a str>,
+}
+
+impl OverridesByDir<'_> {
+    pub(crate) fn get(&self, dir: &Path) -> Option<&str> {
+        if self.by_dir.is_empty() {
+            return None;
+        }
+        let dir = Handle::from_path(dir).ok()?;
+        self.by_dir.get(&dir).copied()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum MetadataVersion {
+    #[serde(rename = "2")]
+    V2,
+    #[serde(rename = "12")]
+    #[default]
+    V12,
+}
+
+impl MetadataVersion {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::V2 => "2",
+            Self::V12 => "12",
+        }
+    }
+}
+
+impl FromStr for MetadataVersion {
+    type Err = RustupError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "2" => Ok(Self::V2),
+            "12" => Ok(Self::V12),
+            _ => Err(RustupError::UnknownMetadataVersion(s.to_owned())),
+        }
+    }
+}
+
+impl fmt::Display for MetadataVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialize_default() {
+        let settings = Settings::default();
+        let toml = settings.stringify().unwrap();
+        assert_eq!(
+            toml,
+            r#"version = "12"
+
+[overrides]
+"#
+        );
+    }
+
+    #[test]
+    fn deserialize_default() {
+        let toml = r#"version = "12""#;
+        let settings = Settings::parse(toml).unwrap();
+        assert_eq!(settings.version, MetadataVersion::V12);
+    }
+
+    #[test]
+    fn serialize_basic() {
+        let settings = Settings {
+            version: MetadataVersion::V12,
+            default_toolchain: Some("stable-aarch64-apple-darwin".to_owned()),
+            profile: Some(Profile::Default),
+            ..Default::default()
+        };
+
+        let toml = settings.stringify().unwrap();
+        assert_eq!(toml, BASIC);
+    }
+
+    #[test]
+    fn deserialize_basic() {
+        let settings = Settings::parse(BASIC).unwrap();
+        assert_eq!(settings.version, MetadataVersion::V12);
+        assert_eq!(
+            settings.default_toolchain,
+            Some("stable-aarch64-apple-darwin".to_owned())
+        );
+        assert_eq!(settings.profile, Some(Profile::Default));
+    }
+
+    const BASIC: &str = r#"version = "12"
+default_toolchain = "stable-aarch64-apple-darwin"
+profile = "default"
+
+[overrides]
+"#;
+
+    #[test]
+    fn deserialize_default_host_triple() {
+        let raw = r#"version = "12"
+default_host_triple = "stable-aarch64-apple-darwin"
+"#;
+        let settings = Settings::parse(raw).unwrap();
+        assert_eq!(
+            settings.default_host_tuple,
+            Some("stable-aarch64-apple-darwin".to_owned())
+        );
+    }
+
+    #[test]
+    fn deserialize_default_host_tuple() {
+        let raw = r#"version = "12"
+default_host_tuple = "stable-aarch64-apple-darwin"
+"#;
+        let settings = Settings::parse(raw).unwrap();
+        assert_eq!(
+            settings.default_host_tuple,
+            Some("stable-aarch64-apple-darwin".to_owned())
+        );
+    }
+}

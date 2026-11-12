@@ -1,0 +1,306 @@
+//! A transactional interface to file system operations needed by the
+//! installer.
+//!
+//! Installation or uninstallation of a single component is done
+//! within a Transaction, which supports a few simple file system
+//! operations. If the Transaction is dropped without committing then
+//! it will *attempt* to roll back the transaction.
+//!
+//! FIXME: This uses ensure_dir_exists in some places but rollback
+//! does not remove any dirs created by it.
+
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use anyhow::{Context, anyhow};
+use tracing::{error, info, warn};
+
+use crate::{
+    dist::{prefix::InstallPrefix, temp},
+    errors::RustupError,
+    utils,
+};
+
+/// A Transaction tracks changes to the file system, allowing them to
+/// be rolled back in case of an error. Instead of deleting or
+/// overwriting file, the old copies are moved to a temporary
+/// folder. If the transaction is rolled back, they will be moved back
+/// into place. If the transaction is committed, these files are
+/// automatically cleaned up using the temp system.
+///
+/// All operations that create files will automatically create any
+/// intermediate directories in the path to the file if they do not
+/// already exist.
+///
+/// All operations that create files will fail if the destination
+/// already exists.
+pub struct Transaction {
+    prefix: InstallPrefix,
+    changes: Vec<ChangedItem>,
+    tmp_cx: Arc<temp::Context>,
+    committed: bool,
+    pub(super) permit_copy_rename: bool,
+}
+
+impl Transaction {
+    pub fn new(
+        prefix: InstallPrefix,
+        tmp_cx: Arc<temp::Context>,
+        permit_copy_rename: bool,
+    ) -> Self {
+        Self {
+            prefix,
+            changes: Vec::new(),
+            tmp_cx,
+            committed: false,
+            permit_copy_rename,
+        }
+    }
+
+    /// Commit must be called for all successful transactions. If not
+    /// called the transaction will be rolled back on drop.
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+
+    /// Add a file at a relative path to the install prefix. Returns a
+    /// `File` that may be used to subsequently write the
+    /// contents.
+    pub fn add_file(&mut self, component: &str, relpath: PathBuf) -> anyhow::Result<File> {
+        assert!(relpath.is_relative());
+        let (item, file) = ChangedItem::add_file(&self.prefix, component, relpath)?;
+        self.changes.push(item);
+        Ok(file)
+    }
+
+    /// Copy a file to a relative path of the install prefix.
+    pub fn copy_file(
+        &mut self,
+        component: &str,
+        relpath: PathBuf,
+        src: &Path,
+    ) -> anyhow::Result<()> {
+        assert!(relpath.is_relative());
+        let abs_path = ChangedItem::dest_abs_path(&self.prefix, component, &relpath)?;
+        utils::copy_file(src, &abs_path)?;
+        self.changes.push(ChangedItem::AddedFile(relpath));
+        Ok(())
+    }
+
+    /// Recursively copy a directory to a relative path of the install prefix.
+    pub fn copy_dir(
+        &mut self,
+        component: &str,
+        relpath: PathBuf,
+        src: &Path,
+    ) -> anyhow::Result<()> {
+        assert!(relpath.is_relative());
+        let abs_path = ChangedItem::dest_abs_path(&self.prefix, component, &relpath)?;
+        utils::copy_dir(src, &abs_path)?;
+        self.changes.push(ChangedItem::AddedDir(relpath));
+        Ok(())
+    }
+
+    /// Remove a file from a relative path to the install prefix.
+    pub fn remove_file(&mut self, component: &str, relpath: PathBuf) -> anyhow::Result<()> {
+        assert!(relpath.is_relative());
+        let abs_path = self.prefix.abs_path(&relpath);
+        let backup = self.tmp_cx.new_file()?;
+        if !utils::path_exists(&abs_path) {
+            // If the file doesn't exist, that's fine, since we would just be deleting it anyway
+            warn!(
+                "failure removing component '{component}', directory does not exist: '{relpath:?}'",
+            );
+            return Ok(());
+        }
+
+        utils::rename("component", &abs_path, &backup, self.permit_copy_rename)?;
+        self.changes.push(ChangedItem::RemovedFile(relpath, backup));
+        Ok(())
+    }
+
+    /// Recursively remove a directory from a relative path of the
+    /// install prefix.
+    pub fn remove_dir(&mut self, component: &str, relpath: PathBuf) -> anyhow::Result<()> {
+        assert!(relpath.is_relative());
+        let abs_path = self.prefix.abs_path(&relpath);
+        let backup = self.tmp_cx.new_directory()?;
+        if !utils::path_exists(&abs_path) {
+            // If the dir doesn't exist, that's fine, since we would just be deleting it anyway
+            warn!(
+                "failure removing component '{component}', directory does not exist: '{relpath:?}'",
+            );
+            return Ok(());
+        }
+
+        utils::rename(
+            "component",
+            &abs_path,
+            &backup.join("bk"),
+            self.permit_copy_rename,
+        )?;
+        self.changes.push(ChangedItem::RemovedDir(relpath, backup));
+        Ok(())
+    }
+
+    /// Create a new file with string contents at a relative path to
+    /// the install prefix.
+    pub fn write_file(
+        &mut self,
+        component: &str,
+        relpath: PathBuf,
+        content: String,
+    ) -> anyhow::Result<()> {
+        assert!(relpath.is_relative());
+        let (item, mut file) = ChangedItem::add_file(&self.prefix, component, relpath.clone())?;
+        utils::write_str(
+            "component",
+            &mut file,
+            &self.prefix.abs_path(&relpath),
+            &content,
+        )?;
+        self.changes.push(item);
+        Ok(())
+    }
+
+    /// If the file exists back it up for rollback, otherwise ensure that the path
+    /// to it exists so that subsequent calls to `File::create` will succeed.
+    ///
+    /// This is used for arbitrarily manipulating a file.
+    pub fn modify_file(&mut self, relpath: PathBuf) -> anyhow::Result<()> {
+        assert!(relpath.is_relative());
+        let abs_path = self.prefix.abs_path(&relpath);
+        let backup = if utils::is_file(&abs_path) {
+            let backup = self.tmp_cx.new_file()?;
+            utils::copy_file(&abs_path, &backup)?;
+            Some(backup)
+        } else {
+            if let Some(p) = abs_path.parent() {
+                utils::ensure_dir_exists("component", p)?;
+            }
+            None
+        };
+
+        self.changes
+            .push(ChangedItem::ModifiedFile(relpath, backup));
+        Ok(())
+    }
+
+    /// Move a file to a relative path of the install prefix.
+    pub(crate) fn move_file(
+        &mut self,
+        component: &str,
+        relpath: PathBuf,
+        src: &Path,
+    ) -> anyhow::Result<()> {
+        assert!(relpath.is_relative());
+        let abs_path = ChangedItem::dest_abs_path(&self.prefix, component, &relpath)?;
+        utils::rename("component", src, &abs_path, self.permit_copy_rename)?;
+        self.changes.push(ChangedItem::AddedFile(relpath));
+        Ok(())
+    }
+
+    /// Recursively move a directory to a relative path of the install prefix.
+    pub(crate) fn move_dir(
+        &mut self,
+        component: &str,
+        relpath: PathBuf,
+        src: &Path,
+    ) -> anyhow::Result<()> {
+        assert!(relpath.is_relative());
+        let abs_path = ChangedItem::dest_abs_path(&self.prefix, component, &relpath)?;
+        utils::rename("component", src, &abs_path, self.permit_copy_rename)?;
+        self.changes.push(ChangedItem::AddedDir(relpath));
+        Ok(())
+    }
+
+    pub(crate) fn temp(&self) -> &temp::Context {
+        &self.tmp_cx
+    }
+}
+
+/// If a Transaction is dropped without being committed, the changes
+/// are automatically rolled back.
+impl Drop for Transaction {
+    fn drop(&mut self) {
+        if !self.committed {
+            info!("rolling back changes");
+            for item in self.changes.iter().rev() {
+                match item.roll_back(&self.prefix, self.permit_copy_rename) {
+                    Ok(()) => {}
+                    Err(e) => error!("{e:#}"),
+                }
+            }
+        }
+    }
+}
+
+/// This is the set of fundamental operations supported on a
+/// Transaction. More complicated operations, such as installing a
+/// package, or updating a component, distill down into a series of
+/// these primitives.
+#[derive(Debug)]
+enum ChangedItem {
+    AddedFile(PathBuf),
+    AddedDir(PathBuf),
+    RemovedFile(PathBuf, temp::File),
+    RemovedDir(PathBuf, temp::Dir),
+    ModifiedFile(PathBuf, Option<temp::File>),
+}
+
+impl ChangedItem {
+    fn roll_back(&self, prefix: &InstallPrefix, permit_copy_rename: bool) -> anyhow::Result<()> {
+        use self::ChangedItem::*;
+        match self {
+            AddedFile(path) => utils::remove_file("component", &prefix.abs_path(path))?,
+            AddedDir(path) => utils::remove_dir("component", &prefix.abs_path(path))?,
+            RemovedFile(path, tmp) | ModifiedFile(path, Some(tmp)) => {
+                utils::rename("component", tmp, &prefix.abs_path(path), permit_copy_rename)?
+            }
+            RemovedDir(path, tmp) => utils::rename(
+                "component",
+                &tmp.join("bk"),
+                &prefix.abs_path(path),
+                permit_copy_rename,
+            )?,
+            ModifiedFile(path, None) => {
+                let abs_path = prefix.abs_path(path);
+                if utils::is_file(&abs_path) {
+                    utils::remove_file("component", &abs_path)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn dest_abs_path(
+        prefix: &InstallPrefix,
+        component: &str,
+        relpath: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        let abs_path = prefix.abs_path(relpath);
+        if utils::path_exists(&abs_path) {
+            Err(anyhow!(RustupError::ComponentConflict {
+                name: component.to_owned(),
+                path: relpath.to_path_buf(),
+            }))
+        } else {
+            if let Some(p) = abs_path.parent() {
+                utils::ensure_dir_exists("component", p)?;
+            }
+            Ok(abs_path)
+        }
+    }
+    fn add_file(
+        prefix: &InstallPrefix,
+        component: &str,
+        relpath: PathBuf,
+    ) -> anyhow::Result<(Self, File)> {
+        let abs_path = Self::dest_abs_path(prefix, component, &relpath)?;
+        let file = File::create(&abs_path)
+            .with_context(|| format!("error creating file '{}'", abs_path.display()))?;
+        Ok((Self::AddedFile(relpath), file))
+    }
+}
