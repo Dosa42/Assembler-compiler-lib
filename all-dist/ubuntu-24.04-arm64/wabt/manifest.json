@@ -1,0 +1,23 @@
+{
+  "component": "wabt",
+  "platform": "ubuntu-24.04-arm64",
+  "artifact_id": 13926580795,
+  "artifact_created_at": "2026-11-12T08:05:59Z",
+  "artifact_digest": "sha256:4c85e28eda14202a841cf41c8508568e359e4968faef0adb88940edc351339d1",
+  "run_id": 43179370823,
+  "run_url": "https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43179370823",
+  "source_commit": "24ea2a565e23022343bb4ed7de2a75d4341064b6",
+  "archive": {
+    "name": "wabt-ubuntu-24.04-arm64.tar.xz",
+    "size": 2367220,
+    "sha256": "93fd44fa6f8b25a30e1133acc40945d0994eff94193be0d65724980bcbf7de9b"
+  },
+  "files": [
+    {
+      "name": "wabt-ubuntu-24.04-arm64.tar.xz",
+      "size": 2367220,
+      "sha256": "93fd44fa6f8b25a30e1133acc40945d0994eff94193be0d65724980bcbf7de9b"
+    }
+  ],
+  "stored_at": "2026-11-12T08:30:35.940181+00:00"
+}
