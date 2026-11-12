@@ -25,7 +25,7 @@ Open [Build GNU ARM64 executables](https://github.com/Dosa42/Assembler-compiler-
 
 For LLVM and Zig, open [Build LLVM and Zig ARM64 executables](https://github.com/Dosa42/Assembler-compiler-lib/actions/workflows/build-llvm-zig-arm64.yml) and select `all`, `llvm` or `zig`.
 
-For Rust and WebAssembly, open [Build Rust and WebAssembly ARM64 executables](https://github.com/Dosa42/Assembler-compiler-lib/actions/workflows/build-rust-wasm-arm64.yml) and select all or one of the eight components. Three jobs can build concurrently; remaining components wait in the queue. Rust builds a stage2 compiler, Cargo, Clippy, rustfmt and standard libraries for aarch64-unknown-linux-gnu and wasm32-unknown-unknown. Its LLVM backend is built from the imported Rust LLVM fork, and the upstream stage0 compiler is used for bootstrap.
+For Rust and WebAssembly, open [Build Rust and WebAssembly ARM64 executables](https://github.com/Dosa42/Assembler-compiler-lib/actions/workflows/build-rust-wasm-arm64.yml) and select all or one of the eight components. Three jobs can build concurrently; remaining components wait in the queue. Rust builds a stage2 compiler, Cargo, Clippy, rustfmt and standard libraries for aarch64-unknown-linux-gnu and wasm32-unknown-unknown. Its LLVM backend is built from the imported Rust LLVM fork, and the upstream stage0 compiler is used for bootstrap. New builds explicitly include rust-lld. The first recovered Rust distribution reuses the saved source-built stage2 compiler and bundles LLD 24 from this repository's verified LLVM build; share/build-info/recovery.json records both build runs and the bundled linker libraries. Its native Cargo and WebAssembly checks pass before publication.
 
 The workflows also build changes to their source directories pushed to `main`. All three support workflow_call.
 
@@ -124,4 +124,4 @@ GCC is built with C and C++, without multilib or a three-stage bootstrap. The wo
 
 For LLVM or Zig, call `./.github/workflows/build-llvm-zig-arm64.yml` with `component: llvm`, `component: zig` or `component: all`.
 
-For Rust or WebAssembly tools, call ./.github/workflows/build-rust-wasm-arm64.yml with component set to rust, rustup, wasm-tools, wabt, binaryen, wasi-sdk, emscripten, emsdk or all. Successful packages are published under all-dist/ubuntu-24.04-arm64/<component> when the build workflow finishes.
+For Rust or WebAssembly tools, call ./.github/workflows/build-rust-wasm-arm64.yml with component set to rust, rustup, wasm-tools, wabt, binaryen, wasi-sdk, emscripten, emsdk or all. Successful packages are published under all-dist/ubuntu-24.04-arm64/<component> when the build workflow finishes. WASI SDK builds restore the pinned upstream Git metadata for its release version and LLVM patch application.
