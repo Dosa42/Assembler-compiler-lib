@@ -319,6 +319,39 @@
         }
       ],
       "stored_at": "2026-11-12T08:30:42.059761+00:00"
+    },
+    "rust": {
+      "component": "rust",
+      "platform": "ubuntu-24.04-arm64",
+      "artifact_id": 13937703010,
+      "artifact_created_at": "2026-11-12T11:11:57Z",
+      "artifact_digest": "sha256:79aa164e697056c510e06169e441380bf97bead7f573579045f8e28bab9dd050",
+      "run_id": 43206784386,
+      "run_url": "https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/43206784386",
+      "source_commit": "6b829d52891963f122bec845342910cbfbc9cbe3",
+      "archive": {
+        "name": "rust-ubuntu-24.04-arm64.tar.xz",
+        "size": 274476340,
+        "sha256": "d54b510cd23de3f2fdb7732d279c6d297f0765c380eaf21bbab70a67042ecfb8"
+      },
+      "files": [
+        {
+          "name": "rust-ubuntu-24.04-arm64.tar.xz.part0001",
+          "size": 99614720,
+          "sha256": "1ac938d775eeafd0e2dea7099e5624e0855fd22caac6ff80552862de7cccee5b"
+        },
+        {
+          "name": "rust-ubuntu-24.04-arm64.tar.xz.part0002",
+          "size": 99614720,
+          "sha256": "0ba560372f30675c83a4a626e195199d9d746a0e3b6832c23929a9f53a7d3b23"
+        },
+        {
+          "name": "rust-ubuntu-24.04-arm64.tar.xz.part0003",
+          "size": 75246900,
+          "sha256": "b4169ab1377324d93ab54dfc43ac98b8e97035af7293434a7c6337f3f34861b2"
+        }
+      ],
+      "stored_at": "2026-11-12T11:13:17.894061+00:00"
     }
   }
 }
