@@ -1,0 +1,14 @@
+The unchanged upstream source tree includes these original author attributions:
+
+com/macfaq/io/LittleEndianInputStream.java
+Copyright 1998, 1999, 2002 Elliotte Rusty Harold
+Version 1.0.3, 28 December 2002
+
+com/macfaq/io/LittleEndianOutputStream.java
+Copyright 1998, 1999 Elliotte Rusty Harold
+Version 1.0.1, 19 May 1999
+Original copied-from reference recorded by upstream:
+http://www.cafeaulait.org/books/javaio/ioexamples/07/LittleEndianOutputStream.java
+
+Full unchanged source headers remain in the pinned upstream source archive.
+The upstream repository license is retained separately as MIT.txt.

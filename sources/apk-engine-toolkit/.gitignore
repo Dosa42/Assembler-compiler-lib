@@ -1,0 +1,10 @@
+.native-work/
+.build-*/
+.ci-library/
+ci/generated-config/
+dist/
+bin/
+__pycache__/
+evidence/
+vendor/*.jar
+vendor/source/
