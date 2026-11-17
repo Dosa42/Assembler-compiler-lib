@@ -1,0 +1,7 @@
+ACTIVITY MANAGER SERVICES (dumpsys activity services)
+  * ServiceRecord{broken}
+    app=ProcessRecord{invalid}
+  * ServiceRecord{ac001 u0 com.example.valid/.ValidService}
+    packageName=com.example.valid processName=com.example.valid
+    app=ProcessRecord{bb001 5151:com.example.valid/u0a51}
+    foregroundId=not_a_number

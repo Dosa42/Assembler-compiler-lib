@@ -1,0 +1,9 @@
+Applications Memory Usage (in Kilobytes):
+Total PSS by process:
+         0K: com.example.zero (pid 100)
+Total RAM: 0K (status critical)
+ Free RAM: 0K (0K cached pss + 0K cached kernel + 0K free)
+ Used RAM: 0K (0K used pss + 0K kernel + 0K gpu)
+ Lost RAM: 0K
+     ZRAM: 0K physical used for 0K in swap (0K total swap)
+   Tuning: 0 (large 0), oom 0K, restore limit 0K

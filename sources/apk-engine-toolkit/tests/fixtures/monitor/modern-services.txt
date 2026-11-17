@@ -1,0 +1,31 @@
+ACTIVITY MANAGER SERVICES (dumpsys activity services)
+  User 0 active services:
+  * ServiceRecord{ab001 u0 com.example.alpha/.MainService}
+    intent={act=example.START cmp=com.example.alpha/.MainService}
+    packageName=com.example.alpha processName=com.example.alpha
+    baseDir=/data/app/com.example.alpha/base.apk
+
+    dataDir=/data/user/0/com.example.alpha
+    app=ProcessRecord{aa001 1234:com.example.alpha/u0a123}
+    isForeground=true foregroundId=7
+    createTime=-1h2m3s lastActivityTime=-20s
+    startRequested=true createdFromFg=false recentCallingUid=1000
+    Connections:
+      * ConnectionRecord{c0ffee u0 CR FGS VIS CAPS com.example.alpha/.MainService:@a1b2}
+        binding=AppBindRecord{bb001 com.example.alpha/.MainService:com.example.client}
+        conn=android.os.BinderProxy@00ff flags=0x1001
+  * ServiceRecord{ab002 u0 com.example.alpha/.SyncService}
+    packageName=com.example.alpha processName=com.example.alpha
+    app=ProcessRecord{aa001 1234:com.example.alpha/u0a123}
+    isForeground=false foregroundId=0 startRequested=false
+  * ServiceRecord{ab003 u0 com.example.alpha/.RemoteService}
+    packageName=com.example.alpha processName=com.example.alpha:remote
+    app=ProcessRecord{aa002 1235:com.example.alpha:remote/u0a123}
+  User 10 active services:
+  * ServiceRecord{ab004 u10 com.example.work/.WorkerService}
+    packageName=com.example.work processName=com.example.work:worker
+    app=ProcessRecord{aa003 4200:com.example.work:worker/u10a42}
+  User 0 active services:
+  * ServiceRecord{ab005 u0 com.example.isolated/.ChildService}
+    packageName=com.example.isolated processName=com.example.isolated:child
+    app=ProcessRecord{aa004 9090:com.example.isolated:child/u0i9}

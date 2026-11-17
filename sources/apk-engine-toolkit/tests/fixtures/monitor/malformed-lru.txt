@@ -1,0 +1,3 @@
+ACTIVITY MANAGER LRU PROCESSES (dumpsys activity lru)
+  #0: malformed-without-process-record
+  #1: cch CEM --------- 5151:com.example.valid/u0a51

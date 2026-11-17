@@ -1,0 +1,14 @@
+** MEMINFO in pid 8 [dev.example.partial] **
+                   Pss  Private  Private  SwapPss      Rss     Heap     Heap     Heap
+                 Total    Dirty    Clean    Dirty    Total     Size    Alloc     Free
+                ------   ------   ------   ------   ------   ------   ------   ------
+  Native Heap      100                10        0      200      500      300      200
+ App Summary
+                       Pss(KB)                        Rss(KB)
+         Native Heap:                                     200
+            Graphics:        0                              0
+             Unknown:                                       0
+ Objects
+ Views: 0 Activities: N/A
+ Native Allocations
+ Other (malloced): 0 0

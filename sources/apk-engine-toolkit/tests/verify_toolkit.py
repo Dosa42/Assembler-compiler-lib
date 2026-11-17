@@ -17,8 +17,9 @@ from pathlib import Path
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-TOOLS = {"inspect_apk", "list_entries", "extract_entries", "create_archive", "align_apk", "check_alignment", "list_dex_classes", "disassemble_dex", "assemble_dex", "decode_xml", "encode_xml", "inspect_resources", "verify_apk", "sign_apk"}
+TOOLS = {"inspect_apk", "list_entries", "extract_entries", "create_archive", "align_apk", "check_alignment", "list_dex_classes", "disassemble_dex", "assemble_dex", "decode_xml", "encode_xml", "inspect_resources", "verify_apk", "sign_apk", "parse_process_snapshot", "parse_meminfo", "inspect_android_processes", "inspect_android_meminfo"}
 PAYLOAD = b"apk-engine-integration-payload-unique-v1\n"
+MONITOR_FIXTURES = PROJECT / "tests/fixtures/monitor"
 
 
 def digest(path):
@@ -119,6 +120,19 @@ class Suite:
         self.mcp_tools = set()
         self.catalog = None
         self.protected = {}
+        self.monitor_log = self.work / "monitor-calls.jsonl"
+        self.monitor_script = PROJECT / "tests/monitor_fixture.py"
+        self.environment["APK_ENGINE_MONITOR_CALL_LOG"] = str(self.monitor_log)
+        self.monitor_mode("success")
+
+    def monitor_mode(self, mode):
+        self.environment["APK_ENGINE_ADB_COMMAND_JSON"] = json.dumps([str(Path(sys.executable).resolve()), "-I", str(self.monitor_script), mode])
+
+    def monitor_arguments(self):
+        return {kind + "_path": str(MONITOR_FIXTURES / ("modern-" + kind + ".txt")) for kind in ["services", "lru", "meminfo"]}
+
+    def monitor_records(self):
+        return [json.loads(line) for line in self.monitor_log.read_text().splitlines()] if self.monitor_log.exists() else []
 
     def process(self, arguments, stdin=None, expected=0, prefix=None):
         command = (self.prefix if prefix is None else prefix) + arguments
@@ -160,8 +174,10 @@ class Suite:
     def case(self, name, action):
         start = time.monotonic()
         try:
-            action()
+            details = action()
             result = {"name": name, "passed": True}
+            if isinstance(details, dict):
+                result.update(details)
         except Exception as error:
             result = {"name": name, "passed": False, "error": type(error).__name__ + ": " + str(error)}
         result["elapsed_seconds"] = round(time.monotonic() - start, 3)
@@ -173,6 +189,10 @@ class Suite:
             with self.target.open("rb") as stream:
                 require(stream.read(4) == b"\x7fELF", "--executable requires a native ELF file")
         self.protected[str(self.target)] = digest(self.target)
+        self.protected[str(self.monitor_script)] = digest(self.monitor_script)
+        for fixture in MONITOR_FIXTURES.iterdir():
+            if fixture.is_file():
+                self.protected[str(fixture)] = digest(fixture)
         self.smali = self.work / "smali"
         self.smali.mkdir()
         (self.smali / "Counter.smali").write_text(".class public Lfixture/Counter;\n.super Ljava/lang/Object;\n.field public static final VALUE:I = 0x2a\n.method public static answer()I\n    .registers 1\n    const/16 v0, 0x2a\n    return v0\n.end method\n")
@@ -217,6 +237,8 @@ class Suite:
             schema = json.loads(self.process([tool["name"], "--schema"])["stdout"])
             require(schema == tool["inputSchema"] and schema["additionalProperties"] is False, "CLI schema differs from catalog")
             require(set(schema["required"]) <= set(schema["properties"]), "Invalid required property")
+            if tool["name"] == "parse_process_snapshot":
+                require(schema["anyOf"] == [{"required": [key]} for key in ["services_path", "lru_path", "meminfo_path"]], "Process schema must require at least one saved input")
         require(json.loads(self.process(["--llms"])["stdout"]) == self.catalog, "--llms catalog mismatch")
         require(self.process(["--version"])["stdout"].strip() == self.catalog["version"], "Version mismatch")
         require("Usage:" in self.process(["--help"])["stdout"], "Help missing")
@@ -272,6 +294,154 @@ class Suite:
             raw_path.write_bytes(archive.read("resources.arsc"))
         raw = self.cli("inspect_resources", {"path": str(raw_path), "offset": 0, "limit": 3})
         require(raw["total"] > 100 and len(raw["entries"]) == 3 and raw["entries"] == packed["entries"], "Real AEE ARSC raw/APK mismatch")
+
+    def assert_processes(self, data):
+        require(data["schemaVersion"] == "rsm-process-parser/1" and data["memoryUnit"] == "KiB", "Process contract identity mismatch")
+        require(data["sourcePresence"] == {"services": True, "lru": True, "meminfo": True}, "Process source presence mismatch")
+        apps = {item["packageName"]: item for item in data["apps"]}
+        alpha = apps["com.example.alpha"]
+        require(set(alpha["pids"]) == {1234, 1235} and len(alpha["services"]) == 3 and alpha["totalRamInKb"] == 12345, "Process merging or service PSS deduplication failed")
+        processes = {item["pid"]: item for item in data["processes"]}
+        require(processes[1235]["ramKb"] == 0 and processes[8888]["ramKb"] is None, "Process zero and missing RAM collapsed")
+        require(processes[4200]["uid"] == 1010042 and processes[4200]["user"] == "10" and processes[9090]["uid"] == 99009, "Android user/isolated UID mapping mismatch")
+        require(data["systemRamInfo"]["totalRamKb"] == 8192000 and data["system_ram_scope"] == "device", "Device RAM scope mismatch")
+
+    def assert_memory(self, data, raw=False):
+        require(data["schema"] == "ayrvokan.rsm.meminfo/1" and data["status"] == "parsed", "Meminfo contract identity/status mismatch")
+        require(data["packageName"] == "dev.example.meminfo" and data["processName"] == "dev.example.meminfo:worker" and data["pid"] == 4242, "Meminfo process identity mismatch")
+        require(data["total"]["pssTotal"] == 2220 and data["total"]["rssTotal"] == 3400, "Meminfo table columns mismatch")
+        require(data["appSummary"]["nativeHeapPss"] == 840 and data["appSummary"]["nativeHeapRss"] == 1600, "Meminfo app summary columns mismatch")
+        require(data["objects"]["activities"] == 0 and data["categories"][2]["heapSize"] is None, "Meminfo zero and missing cells collapsed")
+        require(("rawOutput" in data) == raw, "Meminfo raw_output inclusion mismatch")
+        if raw:
+            require(data["rawOutput"] == (MONITOR_FIXTURES / "android16.txt").read_text(), "Meminfo raw_output changed original input")
+
+    def assert_memory_batch(self, data, raw=False):
+        require(data["schema"] == "apk-engine.meminfo-batch/1" and data["processCount"] == 2, "Multi-process meminfo was not separated")
+        processes = data["processes"]
+        require([item["pid"] for item in processes] == [4242, 4343], "Multi-process PIDs merged")
+        require([item["total"]["pssTotal"] for item in processes] == [2220, 3330] and [item["total"]["rssTotal"] for item in processes] == [3400, 4400], "Multi-process memory values merged")
+        require(all(("rawOutput" in item) == raw for item in processes), "Batch raw_output inclusion mismatch")
+
+    def android_parsers(self):
+        data = self.cli("parse_process_snapshot", self.monitor_arguments(), mode="file")
+        self.assert_processes(data)
+        selected = self.cli("parse_process_snapshot", dict(self.monitor_arguments(), package="com.example.alpha"))
+        require(len(selected["apps"]) == 1 and len(selected["services"]) == 3 and len(selected["processes"]) == 2, "Package filter did not select complete process/service groups")
+        require(all(item["ownerPackageName"] == "com.example.alpha" for item in selected["bindings"]), "Package filter leaked unrelated bindings")
+        require(selected["package_filter"] == "com.example.alpha" and selected["systemRamInfo"] == data["systemRamInfo"], "Package filter changed device-wide memory")
+        absent = self.cli("parse_process_snapshot", dict(self.monitor_arguments(), package="com.example.absent"))
+        require(all(absent[key] == [] for key in ["apps", "services", "processes", "bindings"]), "Absent package returned unrelated processes")
+        partial = self.cli("parse_process_snapshot", {"lru_path": str(MONITOR_FIXTURES / "modern-lru.txt")})
+        require(partial["sourcePresence"] == {"services": False, "lru": True, "meminfo": False} and partial["systemRamInfo"]["totalRamKb"] is None, "Partial process source handling mismatch")
+        zero = self.cli("parse_process_snapshot", {"meminfo_path": str(MONITOR_FIXTURES / "zero-meminfo.txt")})
+        require(zero["systemRamInfo"]["totalRamKb"] == 0 and zero["processes"][0]["ramKb"] == 0, "Observed zero process/system RAM lost")
+        malformed = self.cli("parse_process_snapshot", {kind + "_path": str(MONITOR_FIXTURES / ("malformed-" + kind + ".txt")) for kind in ["services", "lru", "meminfo"]})
+        require(malformed["diagnostics"], "Malformed process records lack diagnostics")
+        path = str(MONITOR_FIXTURES / "android16.txt")
+        self.assert_memory(self.cli("parse_meminfo", {"path": path}, mode="stdin"))
+        self.assert_memory(self.cli("parse_meminfo", {"path": path, "raw_output": True}), True)
+        missing = self.cli("parse_meminfo", {"path": str(MONITOR_FIXTURES / "missing-cells.txt")})
+        require(missing["appSummary"]["nativeHeapPss"] is None and missing["appSummary"]["nativeHeapRss"] == 200 and missing["appSummary"]["graphicsPss"] == 0, "Missing meminfo cells shifted into adjacent fields")
+        unrecognized = self.work / "unrecognized-meminfo.txt"
+        unrecognized.write_text("unrecognized fixture text\n")
+        unknown = self.cli("parse_meminfo", {"path": str(unrecognized)})
+        require(unknown["status"] == "unrecognized" and unknown["total"] is None and unknown["diagnostics"], "Unrecognized meminfo lacks null fields/diagnostics")
+        text = Path(path).read_text()
+        batch = self.work / "multi-process-meminfo.txt"
+        batch.write_text(text + "\n" + text.replace("pid 4242", "pid 4343").replace("dev.example.meminfo:worker", "dev.example.meminfo:second").replace("2220", "3330").replace("3400", "4400"))
+        self.assert_memory_batch(self.cli("parse_meminfo", {"path": str(batch)}))
+        self.assert_memory_batch(self.cli("parse_meminfo", {"path": str(batch), "raw_output": True}), True)
+
+    def android_live(self):
+        data = self.cli("inspect_android_processes", {})
+        self.assert_processes(data)
+        commands = data["acquisition"]["commands"]
+        require(len(commands) == 3 and [item["command"][-2:] for item in commands[:2]] == [["activity", "services"], ["activity", "lru"]] and commands[2]["command"][-1] == "meminfo", "Live process acquisition argv mismatch")
+        require(all(item["exit_code"] == 0 and item["stdout_bytes"] > 0 for item in commands), "Live process acquisition metadata missing")
+        filtered = self.cli("inspect_android_processes", {"package": "com.example.alpha"})
+        require(len(filtered["apps"]) == 1 and len(filtered["processes"]) == 2, "Live package filter failed")
+        memory = self.cli("inspect_android_meminfo", {"package": "dev.example.meminfo"})
+        self.assert_memory(memory)
+        require(memory["acquisition"]["commands"][0]["command"][-2:] == ["meminfo", "dev.example.meminfo"], "Live detailed meminfo argv mismatch")
+        self.assert_memory(self.cli("inspect_android_meminfo", {"package": "dev.example.meminfo", "raw_output": True}), True)
+        try:
+            self.monitor_mode("batch")
+            self.assert_memory_batch(self.cli("inspect_android_meminfo", {"package": "dev.example.meminfo"}))
+            self.assert_memory_batch(self.cli("inspect_android_meminfo", {"package": "dev.example.meminfo", "raw_output": True}), True)
+            self.monitor_mode("stderr-heavy")
+            heavy = self.cli("inspect_android_meminfo", {"package": "dev.example.meminfo"})
+            self.assert_memory(heavy)
+            require(heavy["acquisition"]["commands"][0]["stderr_bytes"] == 131072 and len(heavy["acquisition"]["commands"][0]["stderr"]) == 131072, "Concurrent stderr drain lost or truncated output")
+        finally:
+            self.monitor_mode("success")
+
+    def android_package_filter(self):
+        services = self.work / "shared-process-services.txt"
+        services.write_text("ACTIVITY MANAGER SERVICES (dumpsys activity services)\n  User 0 active services:\n  * ServiceRecord{ab001 u0 com.example.alpha/.SharedService}\n    packageName=com.example.alpha processName=com.example.shared\n    app=ProcessRecord{abc 1234:com.example.shared/u0a123}\n")
+        self.protected[str(services)] = digest(services)
+        shared = self.cli("parse_process_snapshot", {"services_path": str(services), "package": "com.example.shared"})
+        require(all(shared[key] == [] for key in ["apps", "services", "processes", "bindings"]), "Package filter matched another package's shared process name")
+        alpha = self.cli("parse_process_snapshot", {"services_path": str(services), "package": "com.example.alpha"})
+        require(all(len(alpha[key]) == 1 for key in ["apps", "services", "processes"]), "Declared package filter lost shared-process ownership")
+        require(alpha["services"][0]["packageName"] == "com.example.alpha" and alpha["processes"][0]["processName"] == "com.example.shared" and alpha["processes"][0]["pid"] == 1234, "Shared-process fixture identity mismatch")
+
+    def android_termux_default(self):
+        prefix = os.environ.get("PREFIX", "")
+        if not prefix.endswith("/com.termux/files/usr") or not (Path(prefix) / "bin/python3").is_file():
+            return {"applicable": False, "skipped": True, "reason": "Termux Python prefix is not present on this host"}
+        home = self.work / "default-helper-home"
+        helper = home / ".local/bin/phone-adb"
+        helper.parent.mkdir(parents=True)
+        fixture = str(self.monitor_script)
+        helper.write_text("import runpy\nimport sys\nsys.argv = [" + repr(fixture) + ", 'success'] + sys.argv[1:]\nrunpy.run_path(" + repr(fixture) + ", run_name='__main__')\n")
+        previous = self.environment.copy()
+        try:
+            self.environment.pop("APK_ENGINE_ADB_COMMAND_JSON", None)
+            self.environment["HOME"] = str(home)
+            data = self.cli("inspect_android_meminfo", {"package": "dev.example.meminfo"})
+            self.assert_memory(data)
+            command = data["acquisition"]["commands"][0]["command"]
+            require(command[:2] == [str(Path(prefix) / "bin/python3"), str(helper)], "Termux default helper did not use an absolute Python interpreter")
+        finally:
+            self.environment = previous
+        return {"applicable": True, "helper_used_absolute_interpreter": True}
+
+    def android_errors(self):
+        before = len(self.monitor_records())
+        for name, arguments in [("parse_process_snapshot", {}), ("parse_process_snapshot", {"services_path": 7}), ("parse_meminfo", {}), ("parse_meminfo", {"path": str(MONITOR_FIXTURES / "android16.txt"), "raw_output": "yes"}), ("inspect_android_meminfo", {}), ("inspect_android_meminfo", {"package": "dev.example.meminfo", "raw_output": 1}), ("inspect_android_meminfo", {"package": "dev.example.meminfo;echo bad"}), ("inspect_android_processes", {"package": "dev.example bad"}), ("inspect_android_processes", {"unexpected": True})]:
+            self.cli(name, arguments, expected=1)
+        require(len(self.monitor_records()) == before, "Invalid arguments executed a child process")
+        saved = self.environment["APK_ENGINE_ADB_COMMAND_JSON"]
+        try:
+            for configured in ["[]", "{}", "[7]", '["relative-helper"]', '["/missing"] []', '["/missing",null]', '["/missing"', '["/missing"]']:
+                self.environment["APK_ENGINE_ADB_COMMAND_JSON"] = configured
+                self.cli("inspect_android_meminfo", {"package": "dev.example.meminfo"}, expected=1)
+        finally:
+            self.environment["APK_ENGINE_ADB_COMMAND_JSON"] = saved
+        try:
+            for mode, fragment in [("failure", "exit 23"), ("empty", "empty output"), ("permission", "Permission Denial"), ("invalid-utf8", ""), ("overflow", "byte limit"), ("stderr-overflow", "byte limit")]:
+                self.monitor_mode(mode)
+                error = self.cli("inspect_android_meminfo", {"package": "dev.example.meminfo"}, expected=1)
+                require(fragment in error["error"]["message"], "Acquisition failure lost cause: " + mode)
+            self.monitor_mode("failure")
+            self.cli("inspect_android_processes", {}, expected=1)
+            self.monitor_mode("malformed")
+            malformed = self.cli("inspect_android_meminfo", {"package": "dev.example.meminfo"})
+            require(malformed["status"] == "unrecognized" and malformed["diagnostics"], "Live malformed text lost parser diagnostics")
+            self.monitor_mode("timeout")
+            started = time.monotonic()
+            error = self.cli("inspect_android_meminfo", {"package": "dev.example.meminfo"}, expected=1)
+            require("timed out" in error["error"]["message"] and time.monotonic() - started < 55, "Child timeout failed to terminate promptly")
+            timed_out_pid = self.monitor_records()[-1]["pid"]
+            try:
+                os.kill(timed_out_pid, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                raise AssertionError("Timed-out child is still present")
+        finally:
+            self.monitor_mode("success")
 
     def dex_roundtrip(self):
         first = self.work / "first.dex"
@@ -377,7 +547,11 @@ class Suite:
             ("decode_xml", {"path": str(self.work / "mcp.axml")}),
             ("inspect_resources", {"path": str(self.resources), "limit": 2}),
             ("sign_apk", {"path": str(self.apk), "output": str(self.work / "mcp-signed.apk"), "keystore": str(self.store), "alias": "fixture", "min_sdk": 24, "v1": False}),
-            ("verify_apk", {"path": str(self.work / "mcp-signed.apk"), "min_sdk": 24, "max_sdk": 35})]
+            ("verify_apk", {"path": str(self.work / "mcp-signed.apk"), "min_sdk": 24, "max_sdk": 35}),
+            ("parse_process_snapshot", self.monitor_arguments()),
+            ("parse_meminfo", {"path": str(MONITOR_FIXTURES / "android16.txt"), "raw_output": True}),
+            ("inspect_android_processes", {}),
+            ("inspect_android_meminfo", {"package": "dev.example.meminfo"})]
         for identifier, (name, arguments) in enumerate(operations, 10):
             rpc(identifier, "tools/call", {"name": name, "arguments": arguments})
             expected[identifier] = name
@@ -388,6 +562,12 @@ class Suite:
         rpc(104, "unknown/method")
         rpc(105, "tools/call", [])
         rpc(106, "tools/call", {"name": "inspect_apk", "arguments": {"path": str(self.apk), "extra": True}})
+        rpc(107, "tools/call", {"name": "parse_process_snapshot", "arguments": {}})
+        rpc(108, "tools/call", {"name": "parse_meminfo", "arguments": {"path": str(MONITOR_FIXTURES / "android16.txt"), "raw_output": "yes"}})
+        rpc(109, "tools/call", {"name": "inspect_android_meminfo", "arguments": {"package": "dev.example.meminfo;echo bad"}})
+        rpc(110, "tools/call", {"name": "inspect_android_meminfo", "arguments": {}})
+        rpc(111, "tools/call", {"name": "parse_meminfo", "arguments": {"path": []}})
+        rpc(112, "tools/call", {"name": "inspect_android_processes", "arguments": {"package": True}})
         rpc(None, "notifications/ignored")
         record = self.process(["--mcp"], stdin="\n".join(json.dumps(request) for request in requests) + "\n{invalid\n")
         responses = [json.loads(line) for line in record["stdout"].splitlines()]
@@ -407,15 +587,42 @@ class Suite:
             require(json.loads(result["content"][0]["text"]) == structured, "MCP text and structured content disagree")
             self.mcp_tools.add(name)
         require(by_id[100]["result"]["isError"] is True, "Engine failure lacks isError")
-        for identifier in [101, 102, 103, 105, 106]:
+        for identifier in [101, 102, 103, 105, 106, 108, 110, 111, 112]:
             require(by_id[identifier]["error"]["code"] == -32602, "Bad params not distinguished from engine failure")
+        for identifier in [107, 109]:
+            require(by_id[identifier]["result"]["isError"] is True, "Android argument semantics failure lacks isError")
         require(by_id[104]["error"]["code"] == -32601 and by_id[None]["error"]["code"] == -32700, "JSON-RPC error code mismatch")
         aligned = self.work / "mcp-aligned.apk"
         require(all(item["aligned"] for item in offsets(aligned)), "MCP aligned file fails independent offsets")
         require(zip_contents(self.work / "mcp-created.zip") == zip_contents(self.apk), "MCP repacked archive mismatch")
         require((self.work / "mcp-extract/assets/payload.txt").read_bytes() == PAYLOAD, "MCP extraction mismatch")
         require(by_id[23]["result"]["structuredContent"]["result"]["verified"], "MCP signature verification failed")
+        self.assert_processes(by_id[24]["result"]["structuredContent"]["result"])
+        self.assert_memory(by_id[25]["result"]["structuredContent"]["result"], True)
+        self.assert_processes(by_id[26]["result"]["structuredContent"]["result"])
+        self.assert_memory(by_id[27]["result"]["structuredContent"]["result"])
         require(self.process(["--mcp"], stdin="")["stdout"] == "", "EOF emitted unexpected MCP data")
+
+    def mcp_android_failures(self):
+        initialize = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "android-fixture-verifier", "version": "1"}}}
+        ready = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        try:
+            self.monitor_mode("failure")
+            requests = [initialize, ready]
+            for identifier, name in [(2, "inspect_android_processes"), (3, "inspect_android_meminfo")]:
+                requests.append({"jsonrpc": "2.0", "id": identifier, "method": "tools/call", "params": {"name": name, "arguments": {} if identifier == 2 else {"package": "dev.example.meminfo"}}})
+            record = self.process(["--mcp"], stdin="\n".join(json.dumps(item) for item in requests) + "\n")
+            results = {item["id"]: item for item in map(json.loads, record["stdout"].splitlines())}
+            for identifier in [2, 3]:
+                require(results[identifier]["result"]["isError"] is True and "exit 23" in results[identifier]["result"]["structuredContent"]["error"]["message"], "MCP subprocess failure did not preserve exit status")
+            self.monitor_mode("batch")
+            requests = [initialize, ready, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "inspect_android_meminfo", "arguments": {"package": "dev.example.meminfo", "raw_output": True}}}]
+            record = self.process(["--mcp"], stdin="\n".join(json.dumps(item) for item in requests) + "\n")
+            results = {item["id"]: item for item in map(json.loads, record["stdout"].splitlines())}
+            require(results[2]["result"]["isError"] is False, "MCP multi-process meminfo failed")
+            self.assert_memory_batch(results[2]["result"]["structuredContent"]["result"], True)
+        finally:
+            self.monitor_mode("success")
 
     def mcp_invalid_request(self):
         data = self.process(["--mcp"], stdin=json.dumps({"jsonrpc": "2.0", "id": 200}) + "\n")
@@ -426,6 +633,11 @@ class Suite:
         for path, expected in self.protected.items():
             require(digest(path) == expected, "Read-only input changed: " + path)
         require(not list(self.work.rglob(".apk-engine-*.part")), "Partial output files remain")
+        records = self.monitor_records()
+        require(records and all(item["stdin_eof"] for item in records), "ADB fixture did not receive closed stdin")
+        require(all(item["arguments"][:4] == ["shell", "dumpsys", "-t", "30"] for item in records), "ADB fixed argv changed")
+        if self.args.executable:
+            require(all(item["path"] == "/nonexistent" and item["java_home"] is None for item in records), "Native subprocess relied on PATH or JAVA_HOME")
 
 
 def policy_check():
@@ -438,9 +650,9 @@ def policy_check():
     scanner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(scanner)
     scanner.load_rule(rule)
-    path = Path(__file__).resolve()
-    result = scanner.scan(path, path.read_text())
-    return {"required_for_current_host": True, "policy_path": str(rule), "policy_sha256": digest(rule), "scanner_sha256": digest(scanner_path), "result": result, "passed": not result["findings"] and not result["errors"]}
+    paths = [Path(__file__).resolve(), PROJECT / "tests/monitor_fixture.py", PROJECT / "src/main/java/dev/ayrvokan/apkengine/AndroidInspectionTools.java"]
+    results = [scanner.scan(path, path.read_text()) for path in paths]
+    return {"required_for_current_host": True, "policy_path": str(rule), "policy_sha256": digest(rule), "scanner_sha256": digest(scanner_path), "results": results, "passed": all(not result["findings"] and not result["errors"] for result in results)}
 
 
 def main():
@@ -453,7 +665,7 @@ def main():
     parser.add_argument("--reference-apk")
     parser.add_argument("--evidence", default=str(PROJECT / "evidence/integration.json"))
     args = parser.parse_args()
-    record = {"schema": "apk-engine.integration/1", "timestamp_utc": datetime.now(timezone.utc).isoformat(), "execution_kind": "native" if args.executable else "jvm", "native_executed": False, "portable_fixtures": True, "real_reference_requested": bool(args.reference_apk), "tester_sha256": digest(__file__)}
+    record = {"schema": "apk-engine.integration/1", "timestamp_utc": datetime.now(timezone.utc).isoformat(), "execution_kind": "native" if args.executable else "jvm", "native_executed": False, "portable_fixtures": True, "android_acquisition": "controlled_child_subprocess_fixture", "real_reference_requested": bool(args.reference_apk), "tester_sha256": digest(__file__)}
     output = Path(args.evidence)
     if output.is_file():
         previous = json.loads(output.read_text())
@@ -464,12 +676,12 @@ def main():
         suite = Suite(args, Path(temporary))
         suite.case("prepare_isolated_fixtures", suite.prepare)
         if suite.cases[-1]["passed"]:
-            for name, action in [("catalog_and_schemas", suite.schemas), ("zip_extract_repack_alignment", suite.archives), ("binary_xml_and_arsc", suite.xml_resources), ("smali_dex_roundtrip", suite.dex_roundtrip), ("sign_verify_tamper", suite.signing), ("cli_errors_and_output_preservation", suite.error_conditions), ("mcp_all_tools_and_protocol", suite.mcp), ("mcp_invalid_request", suite.mcp_invalid_request)]:
+            for name, action in [("catalog_and_schemas", suite.schemas), ("zip_extract_repack_alignment", suite.archives), ("binary_xml_and_arsc", suite.xml_resources), ("smali_dex_roundtrip", suite.dex_roundtrip), ("sign_verify_tamper", suite.signing), ("cli_errors_and_output_preservation", suite.error_conditions), ("android_saved_parsers", suite.android_parsers), ("android_exact_package_filter", suite.android_package_filter), ("android_live_subprocesses", suite.android_live), ("android_termux_default_helper", suite.android_termux_default), ("android_input_and_subprocess_failures", suite.android_errors), ("mcp_all_tools_and_protocol", suite.mcp), ("mcp_android_subprocess_failures", suite.mcp_android_failures), ("mcp_invalid_request", suite.mcp_invalid_request)]:
                 suite.case(name, action)
             if args.reference_apk:
                 suite.case("real_aee_reference", suite.real_reference)
             suite.case("read_only_inputs_preserved", suite.unchanged)
-        record.update({"target": str(suite.target), "target_sha256": suite.protected.get(str(suite.target)), "cases": suite.cases, "cli_coverage": sorted(suite.cli_tools), "mcp_coverage": sorted(suite.mcp_tools), "expected_tools": sorted(TOOLS), "protected_inputs": suite.protected, "calls": suite.calls})
+        record.update({"target": str(suite.target), "target_sha256": suite.protected.get(str(suite.target)), "cases": suite.cases, "cli_coverage": sorted(suite.cli_tools), "mcp_coverage": sorted(suite.mcp_tools), "expected_tools": sorted(TOOLS), "protected_inputs": suite.protected, "calls": suite.calls, "controlled_android_child_processes": suite.monitor_records()})
         record["native_executed"] = bool(args.executable and any(call["command"][0] == str(suite.target) for call in suite.calls))
     record["fixtures_keys_and_scratch_removed"] = not Path(temporary).exists()
     try:

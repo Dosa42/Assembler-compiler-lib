@@ -214,6 +214,40 @@
         "bytes": 22374
       },
       "upstream_commit": "d46031d170115fa1435d90181cd71af96dd0eeb7"
+    },
+    {
+      "id": "rsm-process-parser",
+      "source_root": "ci/vendor-src/rsm-process-parser/src",
+      "java_release": 17,
+      "output": "rsm-process-parser/lib/rsm-process-parser.jar",
+      "classpath": [],
+      "manifest_main_class": null,
+      "resources": {
+        "META-INF/rsm-process-parser-LICENSE": "ci/vendor-src/rsm-process-parser/LICENSE"
+      },
+      "local_reference": {
+        "path": "rsm-process-parser/lib/rsm-process-parser.jar",
+        "sha256": "e699ce4594716de48e37427bd714ec31a3cc7d6ab94294e4d54434affb84c99b",
+        "bytes": 29627
+      },
+      "upstream_commit": "772e266fb7dd95c76a64b74d10b33af8b95122ab"
+    },
+    {
+      "id": "rsm-meminfo-parser",
+      "source_root": "ci/vendor-src/rsm-meminfo-parser/src",
+      "java_release": 17,
+      "output": "rsm-meminfo-parser/lib/rsm-meminfo-parser.jar",
+      "classpath": [],
+      "manifest_main_class": null,
+      "resources": {
+        "META-INF/rsm-meminfo-parser-LICENSE": "ci/vendor-src/rsm-meminfo-parser/LICENSE"
+      },
+      "local_reference": {
+        "path": "rsm-meminfo-parser/lib/rsm-meminfo-parser.jar",
+        "sha256": "a7bb2712c0210e840142318130007289ff795e57786da46b15b18d3a59adffa9",
+        "bytes": 24929
+      },
+      "upstream_commit": "772e266fb7dd95c76a64b74d10b33af8b95122ab"
     }
   ],
   "source_inputs": [
@@ -402,6 +436,54 @@
       "sha256": "39961513f07c54e796b0fec574e8d64c75e1f0f83736061f114b6f6be1d91e6b",
       "bytes": 11873,
       "origin": "original upstream notice from pinned engine_library package"
+    },
+    {
+      "path": "ci/vendor-src/rsm-process-parser/LICENSE",
+      "bytes": 1079,
+      "sha256": "8ace96dab407f158de4acaa34705805d199918b4c0b7c8aa3363c2ef27466292",
+      "origin": "Java17 adaptation of RSM at 772e266fb7dd95c76a64b74d10b33af8b95122ab; original license preserved"
+    },
+    {
+      "path": "ci/vendor-src/rsm-process-parser/contract.json",
+      "bytes": 6258,
+      "sha256": "358cc66a16836be8918cec241ee5196b31586b45a2513a1613042e9a70619436",
+      "origin": "Java17 adaptation of RSM at 772e266fb7dd95c76a64b74d10b33af8b95122ab; original license preserved"
+    },
+    {
+      "path": "ci/vendor-src/rsm-process-parser/src/dev/ayrvokan/rsm/process/ProcessParser.java",
+      "bytes": 33856,
+      "sha256": "77fe2df48dd87132b02d8fcb68a87681900facf7179ac9f3f3b5147eabaa41b9",
+      "origin": "Java17 adaptation of RSM at 772e266fb7dd95c76a64b74d10b33af8b95122ab; original license preserved"
+    },
+    {
+      "path": "ci/licenses/rsm-process-parser-MIT.txt",
+      "bytes": 1079,
+      "sha256": "8ace96dab407f158de4acaa34705805d199918b4c0b7c8aa3363c2ef27466292",
+      "origin": "Java17 adaptation of RSM at 772e266fb7dd95c76a64b74d10b33af8b95122ab; original license preserved"
+    },
+    {
+      "path": "ci/vendor-src/rsm-meminfo-parser/LICENSE",
+      "bytes": 1079,
+      "sha256": "8ace96dab407f158de4acaa34705805d199918b4c0b7c8aa3363c2ef27466292",
+      "origin": "Java17 adaptation of RSM at 772e266fb7dd95c76a64b74d10b33af8b95122ab; original license preserved"
+    },
+    {
+      "path": "ci/vendor-src/rsm-meminfo-parser/contract.json",
+      "bytes": 12661,
+      "sha256": "acf1ff1f6eca47cd3b1764407b476797c78025c18995d2e2cbdc87d561ddbc30",
+      "origin": "Java17 adaptation of RSM at 772e266fb7dd95c76a64b74d10b33af8b95122ab; original license preserved"
+    },
+    {
+      "path": "ci/vendor-src/rsm-meminfo-parser/src/dev/ayrvokan/rsm/meminfo/MemInfoParser.java",
+      "bytes": 21694,
+      "sha256": "d38af80ce9950ac6b01f6b311cc06075fba0620a651a3720dd4f35f0ba5ad8f3",
+      "origin": "Java17 adaptation of RSM at 772e266fb7dd95c76a64b74d10b33af8b95122ab; original license preserved"
+    },
+    {
+      "path": "ci/licenses/rsm-meminfo-parser-MIT.txt",
+      "bytes": 1079,
+      "sha256": "8ace96dab407f158de4acaa34705805d199918b4c0b7c8aa3363c2ef27466292",
+      "origin": "Java17 adaptation of RSM at 772e266fb7dd95c76a64b74d10b33af8b95122ab; original license preserved"
     }
   ],
   "toolchain": {

@@ -40,7 +40,9 @@ def compile_module(module, library, work):
     result = subprocess.run(command + [str(path) for path in sources], capture_output=True, text=True, timeout=120)
     if result.returncode:
         raise RuntimeError(result.stdout + result.stderr)
-    manifest = "Manifest-Version: 1.0\nMain-Class: " + module["manifest_main_class"] + "\n"
+    manifest = "Manifest-Version: 1.0\n"
+    if module.get("manifest_main_class"):
+        manifest += "Main-Class: " + module["manifest_main_class"] + "\n"
     if module["id"] == "axml":
         manifest += "Class-Path: kxml2-2.3.0.jar\n"
     entries = {"META-INF/MANIFEST.MF": (manifest + "\n").encode()}

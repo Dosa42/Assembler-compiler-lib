@@ -1,0 +1,5 @@
+Applications Memory Usage (in Kilobytes):
+Total PSS by process:
+    not-a-numberK: com.example.broken (pid broken)
+    64K: com.example.valid (pid 5151)
+Total RAM: invalidK

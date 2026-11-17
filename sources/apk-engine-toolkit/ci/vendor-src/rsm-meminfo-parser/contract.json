@@ -1,0 +1,565 @@
+{
+  "schema": "ayrvokan.rsm.meminfo-contract/1",
+  "java_api": {
+    "package": "dev.ayrvokan.rsm.meminfo",
+    "class": "MemInfoParser",
+    "method": "public static java.util.Map<String,Object> parse(String text)",
+    "artifact": "lib/rsm-meminfo-parser.jar",
+    "java_release": 17,
+    "dependencies": []
+  },
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "schema": {
+        "const": "ayrvokan.rsm.meminfo/1"
+      },
+      "status": {
+        "enum": [
+          "parsed",
+          "partial",
+          "unrecognized"
+        ]
+      },
+      "packageName": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "processName": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "pid": {
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "uptimeMs": {
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "realtimeMs": {
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "rawOutput": {
+        "type": "string"
+      },
+      "categories": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "pssTotal": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "privateDirty": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "privateClean": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "swapPssDirty": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "rssTotal": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "heapSize": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "heapAlloc": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "heapFree": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "extraColumns": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "name",
+            "pssTotal",
+            "privateDirty",
+            "privateClean",
+            "swapPssDirty",
+            "rssTotal",
+            "heapSize",
+            "heapAlloc",
+            "heapFree",
+            "extraColumns"
+          ]
+        }
+      },
+      "total": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "pssTotal": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "privateDirty": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "privateClean": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "swapPssDirty": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rssTotal": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "heapSize": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "heapAlloc": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "heapFree": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "extraColumns": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "pssTotal",
+          "privateDirty",
+          "privateClean",
+          "swapPssDirty",
+          "rssTotal",
+          "heapSize",
+          "heapAlloc",
+          "heapFree",
+          "extraColumns"
+        ]
+      },
+      "appSummary": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "javaHeapPss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "javaHeapRss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "nativeHeapPss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "nativeHeapRss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "codePss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "codeRss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "stackPss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "stackRss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "graphicsPss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "graphicsRss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "privateOther": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "system": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "unknownRss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "totalPss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "totalRss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "totalSwapPss": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rows": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "javaHeapPss",
+          "javaHeapRss",
+          "nativeHeapPss",
+          "nativeHeapRss",
+          "codePss",
+          "codeRss",
+          "stackPss",
+          "stackRss",
+          "graphicsPss",
+          "graphicsRss",
+          "privateOther",
+          "system",
+          "unknownRss",
+          "totalPss",
+          "totalRss",
+          "totalSwapPss",
+          "rows"
+        ]
+      },
+      "objects": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "views": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "viewRootImpl": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "appContexts": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "activities": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "assets": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "assetManagers": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "localBinders": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "proxyBinders": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "parcelMemory": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "parcelCount": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "deathRecipients": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "webViews": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "extra": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "views",
+          "viewRootImpl",
+          "appContexts",
+          "activities",
+          "assets",
+          "assetManagers",
+          "localBinders",
+          "proxyBinders",
+          "parcelMemory",
+          "parcelCount",
+          "deathRecipients",
+          "webViews",
+          "extra"
+        ]
+      },
+      "nativeAllocations": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "bitmapCount": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "bitmapTotalKb": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "otherMallocedCount": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "otherMallocedKb": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "otherNonMallocedCount": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "otherNonMallocedKb": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "entries": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "bitmapCount",
+          "bitmapTotalKb",
+          "otherMallocedCount",
+          "otherMallocedKb",
+          "otherNonMallocedCount",
+          "otherNonMallocedKb",
+          "entries"
+        ]
+      },
+      "units": {
+        "type": "object"
+      },
+      "diagnostics": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "severity": {
+              "enum": [
+                "info",
+                "warning",
+                "error"
+              ]
+            },
+            "line": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "line",
+            "message",
+            "text"
+          ]
+        }
+      }
+    },
+    "required": [
+      "schema",
+      "status",
+      "packageName",
+      "processName",
+      "pid",
+      "uptimeMs",
+      "realtimeMs",
+      "rawOutput",
+      "categories",
+      "total",
+      "appSummary",
+      "objects",
+      "nativeAllocations",
+      "units",
+      "diagnostics"
+    ]
+  },
+  "semantics": {
+    "number_type": "java.lang.Long; null means missing/unparseable, numeric zero means observed zero",
+    "units": {
+      "categories": "KiB",
+      "total": "KiB",
+      "appSummary": "KiB",
+      "objects": "count except parcelMemory=KiB",
+      "nativeAllocations": "counts=count; *Kb=KiB",
+      "uptimeMs": "milliseconds",
+      "realtimeMs": "milliseconds"
+    },
+    "header_identity": "processName is bracketed MEMINFO process name; packageName is its colon-free prefix when it resembles an Android package",
+    "missing_section": "null, never synthesized all-zero objects",
+    "category_tables": "Use detected column headers to preserve optional RSS and historical column layouts; retain additional numeric columns in extraColumns",
+    "summary": "Known upstream flat fields plus all parsed rows; blank PSS/RSS cells remain null",
+    "native_allocations": "Known Bitmap (malloced), Other (malloced), Other (nonmalloced) fields plus all named entries",
+    "diagnostics": "Nonfatal unknown/malformed values and unsupported/headerless layouts are explicit; rawOutput retained verbatim",
+    "source_comparison": "Java adaptation preserves upstream field coverage; deliberately distinguishes absent values from zeros and correctly handles blank summary/table cells",
+    "multiple_processes": "IllegalArgumentException: split multiple MEMINFO process blocks before calling this single-process API"
+  },
+  "upstream_commit": "772e266fb7dd95c76a64b74d10b33af8b95122ab"
+}

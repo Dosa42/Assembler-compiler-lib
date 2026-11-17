@@ -76,7 +76,7 @@ def package(lock, binary, toolchain_root):
             shutil.copytree(toolchain_root / "legal", licenses / "liberica-nik", symlinks=False)
         source = base / "share/source"
         source.mkdir(parents=True)
-        for relative in ["src", "tests/verify_toolkit.py", "build.py", "README.md", "LICENSE", "native-dependencies.json", "ci/prepare.py", "ci/check_elf.py", "ci/native_build.py", "ci/vendor-src", "ci/licenses"]:
+        for relative in ["src", "tests", "build.py", "README.md", "LICENSE", "native-dependencies.json", "ci/prepare.py", "ci/check_elf.py", "ci/native_build.py", "ci/vendor-src", "ci/licenses"]:
             original = ROOT / relative
             target = source / relative
             target.parent.mkdir(parents=True, exist_ok=True)

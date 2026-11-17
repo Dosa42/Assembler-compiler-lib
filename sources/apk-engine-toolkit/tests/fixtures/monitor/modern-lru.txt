@@ -1,0 +1,10 @@
+ACTIVITY MANAGER LRU PROCESSES (dumpsys activity lru)
+  Activities:
+  #0: fg     TOP  LCMNFUATI 1234:com.example.alpha/u0a123 act:activities
+  #1: vis+ 3 BFGS LCMNFUATI 1235:com.example.alpha:remote/u0a123 act:treated
+  Other:
+  #2: cch    CEM  --------- 3333:com.example.memoryonly/u0a555
+  #3: svc    SVC  --------- 4200:com.example.work:worker/u10a42
+  #4: cch    CEM  --------- 9090:com.example.isolated:child/u0i9
+  #5: cch    CEM  --------- 8888:com.example.nomemory/u0a777
+  #6: cch    CEM  --------- 1234:com.example.alpha/u0a123

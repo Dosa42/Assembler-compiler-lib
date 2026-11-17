@@ -13,7 +13,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--library', type=pathlib.Path, default=root.parent.parent / 'engine_library')
 args = parser.parse_args()
 library = args.library.resolve()
-engines = ['zip4j', 'zipalign-java', 'smali', 'apksig', 'axml']
+engines = ['zip4j', 'zipalign-java', 'smali', 'apksig', 'axml', 'rsm-process-parser', 'rsm-meminfo-parser']
 jars = []
 for name in engines:
     found = sorted((library / name / 'lib').glob('*.jar'))
@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix='.build-', dir=root) as scratch:
     seen = {}
     services = {}
     with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as out:
-        out.writestr('META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\nMain-Class: dev.ayrvokan.apkengine.Main\nImplementation-Version: 0.1.0\n\n')
+        out.writestr('META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\nMain-Class: dev.ayrvokan.apkengine.Main\nImplementation-Version: 0.2.0\n\n')
         for path in sorted(classes.rglob('*')):
             if path.is_file():
                 relative = path.relative_to(classes).as_posix()
@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix='.build-', dir=root) as scratch:
     shutil.copy2(output, dist / output.name)
 manifest = {
     'schema': 'apk-engine.build/1',
-    'version': '0.1.0',
+    'version': '0.2.0',
     'target': 'JVM intermediate for native AOT build',
     'java_release': 17,
     'sources': {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},

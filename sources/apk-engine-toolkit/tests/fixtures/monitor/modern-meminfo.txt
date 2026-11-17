@@ -1,0 +1,26 @@
+Applications Memory Usage (in Kilobytes):
+Uptime: 123456 Realtime: 234567
+
+Total PSS by process:
+    12,345K: com.example.alpha (pid 1234 / activities)
+         0K: com.example.alpha:remote (pid 1235)
+     2,048K: com.example.memoryonly (pid 3333)
+       512K: com.example.work:worker (pid 4200)
+        64K: com.example.isolated:child (pid 9090)
+     1,024K: /system/bin/surfaceflinger (pid 777)
+       128K: com.example.pssonly:worker (pid 4444)
+
+Total PSS by OOM adjustment:
+    16,121K: Native
+                1,024K: /system/bin/surfaceflinger (pid 777)
+
+Total PSS by category:
+    10,000K: Native
+     6,121K: Dalvik
+
+Total RAM: 8,192,000K (status normal)
+ Free RAM: 2,048,000K (512,000K cached pss + 1,024,000K cached kernel + 512,000K free)
+ Used RAM: 5,120,000K (4,000,000K used pss + 1,000,000K kernel + 120,000K gpu)
+ Lost RAM: 1,024,000K
+     ZRAM: 262,144K physical used for 524,288K in swap (2,097,152K total swap)
+   Tuning: 256 (large 512), oom 184,320K, restore limit 61,440K (high-end-gfx)

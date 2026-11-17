@@ -10,7 +10,7 @@ import java.security.MessageDigest;
 import java.util.*;
 
 public final class Main {
-    public static final String VERSION = "0.1.0";
+    public static final String VERSION = "0.2.0";
     static final PrintWriter OUT = new PrintWriter(System.out, true, StandardCharsets.UTF_8);
     static final Map<String, Tool> TOOLS = new LinkedHashMap<>();
     interface Handler { JsonObject run(JsonObject args) throws Exception; }
@@ -22,6 +22,7 @@ public final class Main {
         DexTools.register();
         XmlTools.register();
         SigningTools.register();
+        AndroidInspectionTools.register();
     }
 
     public static JsonObject obj(Object... pairs) {
@@ -36,6 +37,11 @@ public final class Main {
         if (v instanceof Boolean b) return new JsonPrimitive(b);
         if (v instanceof Number n) return new JsonPrimitive(n);
         if (v instanceof Path || v instanceof File) return new JsonPrimitive(v.toString());
+        if (v instanceof Map<?, ?> entries) {
+            JsonObject out = new JsonObject();
+            for (var entry : entries.entrySet()) out.add(String.valueOf(entry.getKey()), value(entry.getValue()));
+            return out;
+        }
         if (v instanceof Iterable<?> items) {
             JsonArray a = new JsonArray();
             for (Object item : items) a.add(value(item));
