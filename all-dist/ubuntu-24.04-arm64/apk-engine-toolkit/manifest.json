@@ -1,23 +1,23 @@
 {
   "component": "apk-engine-toolkit",
   "platform": "ubuntu-24.04-arm64",
-  "artifact_id": 14338989924,
-  "artifact_created_at": "2026-11-17T15:01:38Z",
-  "artifact_digest": "sha256:aff064e4c5fd7b7952583118da540c29a461a441ce06284ef16c50d401acb82b",
-  "run_id": 44109017751,
-  "run_url": "https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/44109017751",
-  "source_commit": "ec7f47013699faa1bb3b352f6c487d5e28f6f193",
+  "artifact_id": 14344622465,
+  "artifact_created_at": "2026-11-17T15:56:26Z",
+  "artifact_digest": "sha256:986932babbe06729e866b8cb50ca5212e9eaa5791ecddb6701fd74772db6cbf3",
+  "run_id": 44119139955,
+  "run_url": "https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/44119139955",
+  "source_commit": "244623d2f4d26526213e046da8cc0caddf0fcfac",
   "archive": {
     "name": "apk-engine-toolkit-ubuntu-24.04-arm64.tar.xz",
-    "size": 7762372,
-    "sha256": "7570b7705b9d7881f5ab7865c41e33c57a8c3a53d0567ecc87b1522c38bd09e0"
+    "size": 7950072,
+    "sha256": "45ce5732391391cb1716586142bc3e02c7d2b89f06ff9e4f05aba88c404b1e7d"
   },
   "files": [
     {
       "name": "apk-engine-toolkit-ubuntu-24.04-arm64.tar.xz",
-      "size": 7762372,
-      "sha256": "7570b7705b9d7881f5ab7865c41e33c57a8c3a53d0567ecc87b1522c38bd09e0"
+      "size": 7950072,
+      "sha256": "45ce5732391391cb1716586142bc3e02c7d2b89f06ff9e4f05aba88c404b1e7d"
     }
   ],
-  "stored_at": "2026-11-17T15:03:33.308116+00:00"
+  "stored_at": "2026-11-17T15:58:37.098298+00:00"
 }
