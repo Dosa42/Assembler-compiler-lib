@@ -79,8 +79,8 @@
     },
     {
       "path": "src/engine.cpp",
-      "bytes": 21666,
-      "sha256": "8e1ea1bff26671e1a9b57105849884f4a1a2b22208c32dbcb96828e7943abb03"
+      "bytes": 21690,
+      "sha256": "aaa9b21700bf16771426e6b219c22703eebc42e2cf5fa3b1b3143cce91c2ba32"
     },
     {
       "path": "src/main.cpp",
@@ -449,8 +449,8 @@
     },
     {
       "path": "usb/brokkr_usb_broker.c",
-      "bytes": 14752,
-      "sha256": "9370e727bf1e942054468fcc2bc2129d4d6f961b4b2b88bfab7fdde2ac36cd84"
+      "bytes": 15512,
+      "sha256": "9ba185a9c98a077fed9f40177385ab9400aa2135b2b0c11ac75403cf2934255e"
     },
     {
       "path": "usb/brokkr_usb_client.c",
@@ -459,8 +459,8 @@
     },
     {
       "path": "usb/brokkr_usb_client.h",
-      "bytes": 897,
-      "sha256": "2e63287fc6f12ccc7c1b59690be31708e5c1ef92d6084556d5f61b7ac39d2995"
+      "bytes": 1011,
+      "sha256": "7fb5511f0a74804fb301c0cda6443324bd1bb475eb302ac7591f83efc1cc9a03"
     },
     {
       "path": "usb/metadata.schema.json",
@@ -469,8 +469,8 @@
     },
     {
       "path": "usb/tests/check_metadata.py",
-      "bytes": 2150,
-      "sha256": "e5af0c8d39fc9876a00984d7a72b8e5183c4ba8c606f3f900cad38e878db0c81"
+      "bytes": 4436,
+      "sha256": "937ce08f779c760a2bbd017ad210fc024d8ac7663f7111d7a16e475c4cf78ebb"
     },
     {
       "path": "usb/tests/test_usb_broker.c",

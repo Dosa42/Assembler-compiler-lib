@@ -3,9 +3,11 @@
 #define BROKKR_USB_CLIENT_H
 
 #include <stddef.h>
+#include <limits.h>
 
 #define BROKKR_USB_DEFAULT_SOCKET "/data/data/com.termux/files/usr/tmp/brokkr-usb/socket"
-#define BROKKR_USB_METADATA_CAPACITY 8192
+/* Reserves six bytes per path byte plus socket and fixed-field overhead. */
+#define BROKKR_USB_METADATA_CAPACITY (6 * PATH_MAX + 2048)
 
 #ifdef __cplusplus
 extern "C" {

@@ -28,25 +28,39 @@ static int vendor_id = -1, product_id = -1;
 
 static void on_signal(int signal_number) { interrupted = signal_number; }
 
-static void json_string(char *destination, size_t capacity, const char *source) {
+static int json_string(char *destination, size_t capacity, const char *source) {
+    if (!capacity) { errno = EMSGSIZE; return -1; }
+    static const char hex[] = "0123456789abcdef";
     size_t out = 0;
-    for (const unsigned char *in = (const unsigned char *)source; *in && out + 7 < capacity; in++) {
+    for (const unsigned char *in = (const unsigned char *)source; *in; in++) {
+        size_t needed = *in < 32 ? 6 : (*in == '"' || *in == '\\') ? 2 : 1;
+        if (needed >= capacity - out) { destination[0] = '\0'; errno = EMSGSIZE; return -1; }
         if (*in == '"' || *in == '\\') { destination[out++] = '\\'; destination[out++] = (char)*in; }
-        else if (*in < 32) out += (size_t)snprintf(destination + out, capacity - out, "\\u%04x", *in);
+        else if (*in < 32) {
+            destination[out++] = '\\'; destination[out++] = 'u';
+            destination[out++] = '0'; destination[out++] = '0';
+            destination[out++] = hex[*in >> 4]; destination[out++] = hex[*in & 15];
+        }
         else destination[out++] = (char)*in;
     }
     destination[out] = '\0';
+    return 0;
 }
 
-static void metadata(char *json, size_t capacity, const char *state, const char *error) {
-    char escaped_path[PATH_MAX * 2], escaped_socket[256];
+static int metadata(char *json, size_t capacity, const char *state, const char *error) {
+    if (!capacity) { errno = EMSGSIZE; return -1; }
+    json[0] = '\0';
+    char escaped_path[sizeof(device_path) * 6], escaped_socket[sizeof(socket_path) * 6];
     char vendor[16] = "null", product[16] = "null", error_field[128] = "";
-    json_string(escaped_path, sizeof(escaped_path), device_path);
-    json_string(escaped_socket, sizeof(escaped_socket), socket_path);
+    if (json_string(escaped_path, sizeof(escaped_path), device_path) < 0 ||
+        json_string(escaped_socket, sizeof(escaped_socket), socket_path) < 0) return -1;
     if (vendor_id >= 0) snprintf(vendor, sizeof(vendor), "%d", vendor_id);
     if (product_id >= 0) snprintf(product, sizeof(product), "%d", product_id);
-    if (error) snprintf(error_field, sizeof(error_field), ",\"error\":\"%s\"", error);
-    snprintf(json, capacity,
+    if (error) {
+        int length = snprintf(error_field, sizeof(error_field), ",\"error\":\"%s\"", error);
+        if (length < 0 || (size_t)length >= sizeof(error_field)) { errno = EMSGSIZE; return -1; }
+    }
+    int length = snprintf(json, capacity,
              "{\"schema\":\"brokkr.usb-broker/1\",\"state\":\"%s\",\"pid\":%ld,\"uid\":%ld,"
              "\"session\":\"%s\",\"socket\":\"%s\",\"device_path\":\"%s\","
              "\"identity\":{\"dev\":%ju,\"ino\":%ju,\"rdev\":%ju,\"mode\":%u},"
@@ -55,6 +69,8 @@ static void metadata(char *json, size_t capacity, const char *state, const char 
              (uintmax_t)device_identity.st_dev, (uintmax_t)device_identity.st_ino,
              (uintmax_t)device_identity.st_rdev, (unsigned)device_identity.st_mode,
              vendor, product, (intmax_t)opened_at, (intmax_t)time(NULL), error_field);
+    if (length < 0 || (size_t)length >= capacity) { json[0] = '\0'; errno = EMSGSIZE; return -1; }
+    return 0;
 }
 
 static int save_metadata(const char *json) {
@@ -185,8 +201,7 @@ static int serve(void) {
     if (lstat(socket_path, &socket_identity) < 0 || chmod(socket_path, 0600) < 0 || listen(server, 8) < 0) {
         perror("listen"); goto done;
     }
-    metadata(json, sizeof(json), "open", NULL);
-    if (save_metadata(json) < 0) { perror("metadata"); goto done; }
+    if (metadata(json, sizeof(json), "open", NULL) < 0 || save_metadata(json) < 0) { perror("metadata"); goto done; }
     recorded = true;
     puts(json);
     fflush(stdout);
@@ -209,37 +224,36 @@ static int serve(void) {
         ssize_t size = recv(client, command, sizeof(command) - 1, MSG_TRUNC);
         if (size <= 0 || size >= (ssize_t)sizeof(command)) { close(client); continue; }
         command[size] = '\0';
-        if (!strcmp(command, "GET\n")) {
-            metadata(json, sizeof(json), "open", NULL);
-            (void)send_response(client, json, device_fd);
-        } else if (!strcmp(command, "STATUS\n")) {
-            metadata(json, sizeof(json), "open", NULL);
-            (void)send_response(client, json, -1);
-        } else if (!strncmp(command, "STOP ", 5)) {
+        int response_fd = -1;
+        bool stopping = false;
+        const char *state = "open", *error = NULL;
+        if (!strcmp(command, "GET\n")) response_fd = device_fd;
+        else if (!strcmp(command, "STATUS\n")) { }
+        else if (!strncmp(command, "STOP ", 5)) {
             char expected[39];
             snprintf(expected, sizeof(expected), "STOP %s\n", session);
             if (strcmp(command, expected)) {
-                metadata(json, sizeof(json), "open", "session_mismatch");
-                (void)send_response(client, json, -1);
+                error = "session_mismatch";
             } else {
                 close(device_fd);
                 device_fd = -1;
-                metadata(json, sizeof(json), "closed", NULL);
-                (void)send_response(client, json, -1);
-                close(client);
-                break;
+                state = "closed";
+                stopping = true;
             }
-        } else {
-            metadata(json, sizeof(json), "open", "unknown_command");
-            (void)send_response(client, json, -1);
+        } else error = "unknown_command";
+        if (metadata(json, sizeof(json), state, error) < 0) {
+            perror("response metadata"); close(client); result = 1; break;
         }
+        (void)send_response(client, json, response_fd);
         close(client);
+        if (stopping) break;
     }
 done:
     if (device_fd >= 0) { close(device_fd); device_fd = -1; }
     if (recorded) {
-        metadata(json, sizeof(json), "closed", NULL);
-        if (save_metadata(json) < 0) { perror("closed metadata"); result = 1; }
+        if (metadata(json, sizeof(json), "closed", NULL) < 0 || save_metadata(json) < 0) {
+            perror("closed metadata"); result = 1;
+        }
     }
     if (server >= 0) close(server);
     if (bound) {
@@ -261,9 +275,11 @@ static int parse_fd(const char *text) {
 }
 
 static void print_unavailable(const char *path, int error) {
-    char escaped_path[256], escaped_error[512];
-    json_string(escaped_path, sizeof(escaped_path), path);
-    json_string(escaped_error, sizeof(escaped_error), strerror(error));
+    char escaped_path[sizeof(socket_path) * 6], escaped_error[512];
+    if (json_string(escaped_path, sizeof(escaped_path), path) < 0 ||
+        json_string(escaped_error, sizeof(escaped_error), strerror(error)) < 0) {
+        perror("unavailable metadata"); return;
+    }
     printf("{\"schema\":\"brokkr.usb-broker/1\",\"state\":\"unavailable\",\"socket\":\"%s\","
            "\"error_errno\":%d,\"error\":\"%s\"}\n", escaped_path, error, escaped_error);
 }

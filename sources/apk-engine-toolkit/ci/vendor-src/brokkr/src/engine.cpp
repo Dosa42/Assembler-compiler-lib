@@ -325,7 +325,7 @@ string device(const std::vector<string> &args, bool flash) {
   }
   OwnedFd acquired;
   if (!options.socket.empty()) {
-    char metadata[8192] = {};
+    char metadata[BROKKR_USB_METADATA_CAPACITY] = {};
     acquired.fd = brokkr_usb_acquire(options.socket.c_str(), metadata, sizeof(metadata));
     if (acquired.fd < 0) throw Failure("usb_session", "USB broker acquisition failed: " + string(std::strerror(errno)));
     options.fd = acquired.fd;
