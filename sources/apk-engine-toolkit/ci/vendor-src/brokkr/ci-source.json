@@ -474,8 +474,8 @@
     },
     {
       "path": "usb/tests/test_usb_broker.c",
-      "bytes": 7193,
-      "sha256": "eaed3e19036513f62a39c1cfeb13b5d5d978e2957210b3a68f5d2f77185c2f5f"
+      "bytes": 7237,
+      "sha256": "baa6ecb5921e4fb8aef319308fac6b6a7a68826c01fc5cca6e86052dc391bc83"
     },
     {
       "path": "verify.py",

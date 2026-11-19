@@ -90,7 +90,8 @@ int main(int argc, char **argv) {
     int length = snprintf(directory, sizeof(directory), "%s/brokkr-test-XXXXXX", temporary);
     CHECK(length > 0 && (size_t)length + sizeof("/socket") <= sizeof(path));
     CHECK(mkdtemp(directory) != NULL);
-    snprintf(path, sizeof(path), "%s/socket", directory);
+    memcpy(path, directory, (size_t)length);
+    memcpy(path + length, "/socket", sizeof("/socket"));
     snprintf(fixture, sizeof(fixture), "%s/fixture", directory);
     int initial = open(fixture, O_CREAT | O_EXCL | O_WRONLY, 0600);
     CHECK(initial >= 0);
