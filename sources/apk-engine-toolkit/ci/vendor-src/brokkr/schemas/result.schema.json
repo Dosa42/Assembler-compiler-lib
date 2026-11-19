@@ -1,0 +1,620 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:brokkr:result:1",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "brokkr.result/1"
+        },
+        "ok": {
+          "const": true
+        },
+        "operation": {
+          "const": "parse-pit"
+        },
+        "result": {
+          "$ref": "#/$defs/pit"
+        }
+      },
+      "required": [
+        "schema",
+        "ok",
+        "operation",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "brokkr.result/1"
+        },
+        "ok": {
+          "const": true
+        },
+        "operation": {
+          "const": "inspect-firmware"
+        },
+        "result": {
+          "$ref": "#/$defs/inspection"
+        }
+      },
+      "required": [
+        "schema",
+        "ok",
+        "operation",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "brokkr.result/1"
+        },
+        "ok": {
+          "const": true
+        },
+        "operation": {
+          "const": "verify-firmware"
+        },
+        "result": {
+          "$ref": "#/$defs/verification"
+        }
+      },
+      "required": [
+        "schema",
+        "ok",
+        "operation",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "brokkr.result/1"
+        },
+        "ok": {
+          "const": true
+        },
+        "operation": {
+          "const": "map-firmware-to-pit"
+        },
+        "result": {
+          "$ref": "#/$defs/mapping"
+        }
+      },
+      "required": [
+        "schema",
+        "ok",
+        "operation",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "brokkr.result/1"
+        },
+        "ok": {
+          "const": true
+        },
+        "operation": {
+          "const": "device-probe"
+        },
+        "result": {
+          "$ref": "#/$defs/probe"
+        }
+      },
+      "required": [
+        "schema",
+        "ok",
+        "operation",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "brokkr.result/1"
+        },
+        "ok": {
+          "const": true
+        },
+        "operation": {
+          "const": "flash"
+        },
+        "result": {
+          "$ref": "#/$defs/flash"
+        }
+      },
+      "required": [
+        "schema",
+        "ok",
+        "operation",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "brokkr.result/1"
+        },
+        "ok": {
+          "const": false
+        },
+        "operation": {
+          "type": "string"
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "minLength": 1
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "ok",
+        "operation",
+        "error"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "partition": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "bin_type": {
+          "type": "integer"
+        },
+        "dev_type": {
+          "type": "integer"
+        },
+        "attribute": {
+          "type": "integer"
+        },
+        "begin_block": {
+          "type": "integer"
+        },
+        "block_bytes": {
+          "type": "integer"
+        },
+        "block_count": {
+          "type": "integer"
+        },
+        "wire_block_size": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "file_name": {
+          "type": "string"
+        },
+        "capacity_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "bin_type",
+        "dev_type",
+        "attribute",
+        "begin_block",
+        "block_bytes",
+        "block_count",
+        "wire_block_size",
+        "name",
+        "file_name",
+        "capacity_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "entry": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "data_offset": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "size_bytes",
+        "data_offset"
+      ],
+      "additionalProperties": false
+    },
+    "image": {
+      "type": "object",
+      "properties": {
+        "basename": {
+          "type": "string"
+        },
+        "source_basename": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "disk_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lz4": {
+          "type": "boolean"
+        },
+        "lz4_block_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "display": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "basename",
+        "source_basename",
+        "size_bytes",
+        "disk_bytes",
+        "lz4",
+        "lz4_block_bytes",
+        "display"
+      ],
+      "additionalProperties": false
+    },
+    "pit": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "com_tar2": {
+          "type": "string"
+        },
+        "cpu_bl_id": {
+          "type": "string"
+        },
+        "lu_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "is_ab": {
+          "type": "boolean"
+        },
+        "common_block_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "partitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/partition"
+          }
+        }
+      },
+      "required": [
+        "path",
+        "com_tar2",
+        "cpu_bl_id",
+        "lu_count",
+        "is_ab",
+        "common_block_bytes",
+        "partitions"
+      ],
+      "additionalProperties": false
+    },
+    "inspection": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "file_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "format": {
+          "enum": [
+            "tar",
+            "raw"
+          ]
+        },
+        "tar_payload_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/entry"
+          }
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/image"
+          }
+        }
+      },
+      "required": [
+        "path",
+        "file_bytes",
+        "format",
+        "tar_payload_bytes",
+        "entries",
+        "images"
+      ],
+      "additionalProperties": false
+    },
+    "verification": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "structural_valid": {
+          "const": true
+        },
+        "md5_status": {
+          "enum": [
+            "verified",
+            "absent"
+          ]
+        },
+        "md5_verified": {
+          "type": "boolean"
+        },
+        "bytes_hashed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "images_checked": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "path",
+        "structural_valid",
+        "md5_status",
+        "md5_verified",
+        "bytes_hashed",
+        "images_checked"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "md5_status": {
+                "const": "verified"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "md5_verified": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "md5_verified": {
+                "const": false
+              },
+              "bytes_hashed": {
+                "const": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "mapping": {
+      "type": "object",
+      "properties": {
+        "pit": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "partition_id": {
+                "type": "integer"
+              },
+              "partition_name": {
+                "type": "string"
+              },
+              "dev_type": {
+                "type": "integer"
+              },
+              "image": {
+                "type": "string"
+              },
+              "size_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "capacity_bytes": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "partition_id",
+              "partition_name",
+              "dev_type",
+              "image",
+              "size_bytes",
+              "capacity_bytes"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1
+        },
+        "unmapped": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "pit",
+        "items",
+        "unmapped"
+      ],
+      "additionalProperties": false
+    },
+    "device_pit": {
+      "type": "object",
+      "properties": {
+        "com_tar2": {
+          "type": "string"
+        },
+        "cpu_bl_id": {
+          "type": "string"
+        },
+        "lu_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "is_ab": {
+          "type": "boolean"
+        },
+        "common_block_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "partitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/partition"
+          }
+        }
+      },
+      "required": [
+        "com_tar2",
+        "cpu_bl_id",
+        "lu_count",
+        "is_ab",
+        "common_block_bytes",
+        "partitions"
+      ],
+      "additionalProperties": false
+    },
+    "probe": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "type": "integer"
+        },
+        "ack_word": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "compressed_download": {
+          "type": "boolean"
+        },
+        "interface": {
+          "type": "integer"
+        },
+        "bulk_in": {
+          "type": "integer"
+        },
+        "bulk_out": {
+          "type": "integer"
+        },
+        "pit": {
+          "$ref": "#/$defs/device_pit"
+        }
+      },
+      "required": [
+        "protocol",
+        "ack_word",
+        "compressed_download",
+        "interface",
+        "bulk_in",
+        "bulk_out",
+        "pit"
+      ],
+      "additionalProperties": false
+    },
+    "flash": {
+      "type": "object",
+      "properties": {
+        "completed": {
+          "const": true
+        },
+        "reboot_requested": {
+          "type": "boolean"
+        },
+        "embedded_pit_uploaded": {
+          "type": "boolean"
+        },
+        "images": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "completed",
+        "reboot_requested",
+        "embedded_pit_uploaded",
+        "images"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,486 @@
+{
+  "schema": "apk-engine.brokkr-source/1",
+  "producer": "ci/build_brokkr.py",
+  "files": [
+    {
+      "path": "CMakeLists.txt",
+      "bytes": 2907,
+      "sha256": "97ff1e805f910385dfdacb71d191bbbee556b668f6ba502c9f1d71f4863d7b5f"
+    },
+    {
+      "path": "README.md",
+      "bytes": 5984,
+      "sha256": "63240a4896c54c4870d4102a3e7a74b05b6f42fa7b80ef643a359ac867302421"
+    },
+    {
+      "path": "build.py",
+      "bytes": 3067,
+      "sha256": "d740807e7f68f7ba7ebb54f20cf30001d71c2217f0082fb2b10fbadc5f67f010"
+    },
+    {
+      "path": "examples/native_client.c",
+      "bytes": 295,
+      "sha256": "d69bb1e8a73fd21a40995cefecf6c50a7688b52591de049a5e1d0d0ccb19b7d1"
+    },
+    {
+      "path": "fixtures/generate.py",
+      "bytes": 3516,
+      "sha256": "0b238af37256b2ea4e218d019a98bf00e3a807780a3ea600f06426ac0a94cf3f"
+    },
+    {
+      "path": "include/brokkr_engine.h",
+      "bytes": 471,
+      "sha256": "3b064fa8c4998b764a8bbeec04cb0872ec9c94a709e69fa2ce86871b09ec7bcf"
+    },
+    {
+      "path": "licenses/Brokkr-GPL-3.0.txt",
+      "bytes": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    {
+      "path": "licenses/THIRD-PARTY.md",
+      "bytes": 2276,
+      "sha256": "ffcbb064fc01831ce64235c13463cc58538bb1ec43f8c99ccfd75186bb39b54a"
+    },
+    {
+      "path": "licenses/libcxx-LICENSE.TXT",
+      "bytes": 16703,
+      "sha256": "539dd7aed86e8a4f12cbdd0e6c50c189c7d74847e4fecc64ce2c6ee3a01da38b"
+    },
+    {
+      "path": "licenses/libcxx-Termux-copyright.txt",
+      "bytes": 1662,
+      "sha256": "aecb9504bcc76b4ff5e8ff1266344bb607b6bed2bfc3dd8b35233d941401d01e"
+    },
+    {
+      "path": "licenses/libcxxabi-LICENSE.TXT",
+      "bytes": 16706,
+      "sha256": "e2b35be49f7284a45b7baca8fc7b3ab7440e7902392b2528a457816b5bb2a15c"
+    },
+    {
+      "path": "licenses/libusb-LGPL-2.1.txt",
+      "bytes": 26530,
+      "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551"
+    },
+    {
+      "path": "schemas/offline-verification.schema.json",
+      "bytes": 3703,
+      "sha256": "7b22f32dd442d33548bd99cb469311ae82cf1927ffa5776bb741c2aa07a47ade"
+    },
+    {
+      "path": "schemas/package-records.schema.json",
+      "bytes": 10029,
+      "sha256": "d8b339c6101555909daacfcd883740c8edbde1e465a5866c3ec007215988c65e"
+    },
+    {
+      "path": "schemas/result.schema.json",
+      "bytes": 12567,
+      "sha256": "1984e5416442ffe606345738025073eda81984a2d7e42cd430c14d59e481c649"
+    },
+    {
+      "path": "src/engine.cpp",
+      "bytes": 21666,
+      "sha256": "8e1ea1bff26671e1a9b57105849884f4a1a2b22208c32dbcb96828e7943abb03"
+    },
+    {
+      "path": "src/main.cpp",
+      "bytes": 326,
+      "sha256": "601baf362e0e8249c6daa490a30a223f576c8294b89228a6b1e9331bc85f8036"
+    },
+    {
+      "path": "upstream/dependencies/libusb-1.0.30.tar.bz2",
+      "bytes": 656112,
+      "sha256": "fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf"
+    },
+    {
+      "path": "upstream/dependencies/provenance.json",
+      "bytes": 2328,
+      "sha256": "7bddd86e86f59417d986f05f95f6afff7dc53b2dd1041b6513925e6f04667bc8"
+    },
+    {
+      "path": "upstream/dependencies/termux-libcxx-build.sh",
+      "bytes": 1209,
+      "sha256": "f0e670ec0f30469e91920a42427115e4bee082c8a22a6dc72e983603dfe659cf"
+    },
+    {
+      "path": "upstream/dependencies/termux-libusb/build.sh",
+      "bytes": 893,
+      "sha256": "2777a57332d418e68fa8ebe050b5688c0771cc8305be0a2f21ee0ee7f4a7a05b"
+    },
+    {
+      "path": "upstream/dependencies/termux-libusb/termux-usb-support.patch",
+      "bytes": 4185,
+      "sha256": "da923c4744e988fcfeab58c5cf51496a7eeadd8b0570425ed0b3a79b453d2369"
+    },
+    {
+      "path": "upstream/original/CMakeLists.txt",
+      "bytes": 23069,
+      "sha256": "dff8e128c677feff44d3a5fcf5321f86e057308adeb674cb887a93b3a02e6d8b"
+    },
+    {
+      "path": "upstream/original/LICENSE",
+      "bytes": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    {
+      "path": "upstream/original/src/app/md5_verify.cpp",
+      "bytes": 21115,
+      "sha256": "64f1035955e594e03f8498af278d81b17c1723262be6a2cda19239d3096fddd1"
+    },
+    {
+      "path": "upstream/original/src/app/md5_verify.hpp",
+      "bytes": 1858,
+      "sha256": "848fba959d13eb71bae2d2c6b849d2fd50e1b5089048ba698cdf9a58e4b16c4a"
+    },
+    {
+      "path": "upstream/original/src/app/md5_xxh3_cache.cpp",
+      "bytes": 14754,
+      "sha256": "12bc647a998d1bb2e703f2fb5b23f85f07b99f0831e9c6f8f58cac19cdd49318"
+    },
+    {
+      "path": "upstream/original/src/app/md5_xxh3_cache.hpp",
+      "bytes": 2534,
+      "sha256": "1263711c6de7e7edff2374a9f62d698f2c80c67db29d2b55161fcdc9b672a0f0"
+    },
+    {
+      "path": "upstream/original/src/app/pit_file.hpp",
+      "bytes": 1489,
+      "sha256": "e5e01a59ee2452a9592e7a414d401227288df886fefe4c2193e976859ee57e79"
+    },
+    {
+      "path": "upstream/original/src/core/byte_transport.hpp",
+      "bytes": 1542,
+      "sha256": "1c65ca537fad4640b7961f6aa5ed963f0da169017fa8072dd50adbedb1d007ff"
+    },
+    {
+      "path": "upstream/original/src/core/bytes.hpp",
+      "bytes": 1262,
+      "sha256": "690306ef5c7c8fbbbf665434ab56f0b5db5653b685906b19e917201c6fb6eb58"
+    },
+    {
+      "path": "upstream/original/src/core/compat.hpp",
+      "bytes": 1098,
+      "sha256": "9f6b9be70ea80963957cab7dece8796e9154704f0c96bfcbfe9fa3d0803af053"
+    },
+    {
+      "path": "upstream/original/src/core/elapsed.hpp",
+      "bytes": 1249,
+      "sha256": "27d3a8419563c43092804a9c4f8325a713c49ea4b75eb91b4b048acd42471f6d"
+    },
+    {
+      "path": "upstream/original/src/core/endian.hpp",
+      "bytes": 1226,
+      "sha256": "397a83fd20e7ea224cec3a43ee52f3ffe1c8ddcfd03c2aedbe480cecabcce894"
+    },
+    {
+      "path": "upstream/original/src/core/path_utf8.hpp",
+      "bytes": 1350,
+      "sha256": "db4f2a74b19f9c8edb9d67be564761d976b488b2ebba99ed1acffcad99cefdfd"
+    },
+    {
+      "path": "upstream/original/src/core/prefetcher.hpp",
+      "bytes": 5448,
+      "sha256": "58ce321c15e781946484a16cdeb5fc11c49d5497df124d2dca99d1cc1ef90f5c"
+    },
+    {
+      "path": "upstream/original/src/core/status.hpp",
+      "bytes": 2341,
+      "sha256": "6a078d60116e789180ec3fdf1223515a6fcdeb7a3b8fc1bc748d2bdc974f1a97"
+    },
+    {
+      "path": "upstream/original/src/core/str.hpp",
+      "bytes": 1619,
+      "sha256": "4003d8d1e49b38557f79ac5fb68dd257a2bff70c1b865dea255c8bbe54eb35e8"
+    },
+    {
+      "path": "upstream/original/src/core/thread_pool.cpp",
+      "bytes": 3210,
+      "sha256": "6b02e0e612c5a0b0b7fe2b50a455234a6acd9e8933614d8d5bd3e2802c0411e3"
+    },
+    {
+      "path": "upstream/original/src/core/thread_pool.hpp",
+      "bytes": 1949,
+      "sha256": "aaf1b3d4afe6dc25f8b08fcbb0a5e76499c07aec1ca8fc755c6004ca5d806b66"
+    },
+    {
+      "path": "upstream/original/src/core/thread_priority.hpp",
+      "bytes": 1970,
+      "sha256": "db8b97c3cf4dddcec34dad729b57333e1d4d270aa8412633fbd3b799f1d9a97f"
+    },
+    {
+      "path": "upstream/original/src/io/lz4_frame.cpp",
+      "bytes": 10061,
+      "sha256": "8f1a9424fc2417199c8317b915dbba05ff73b16c656e0c0688f63effe123d1a6"
+    },
+    {
+      "path": "upstream/original/src/io/lz4_frame.hpp",
+      "bytes": 3815,
+      "sha256": "d29df579ba88614622b72925c02bdfaf74b29411854fa31723f445ae2ac9eefd"
+    },
+    {
+      "path": "upstream/original/src/io/random_access.cpp",
+      "bytes": 8796,
+      "sha256": "aebbb8027c29225c2abfcf19141c3cf4b795c91f2518384ff91a4c419223aee7"
+    },
+    {
+      "path": "upstream/original/src/io/random_access.hpp",
+      "bytes": 1840,
+      "sha256": "7d6008c0df18c61cf691b2da927a683ae0fc993138a94c0da542e7364e7758aa"
+    },
+    {
+      "path": "upstream/original/src/io/read_exact.hpp",
+      "bytes": 1230,
+      "sha256": "899e1d59fa3e5615620cde09f6271da9e5fc7fd59f2de8b6112badbffb4fc87a"
+    },
+    {
+      "path": "upstream/original/src/io/sequential_reader.cpp",
+      "bytes": 4740,
+      "sha256": "a5aef339cbaf798967a90980d03fc275356a5d64830cd0b35e7e5ca46fe2f1a8"
+    },
+    {
+      "path": "upstream/original/src/io/sequential_reader.hpp",
+      "bytes": 1373,
+      "sha256": "14327f65fddffc29ad92b100fb07b9acee019b2c19dd991f57d36828f80dfcb0"
+    },
+    {
+      "path": "upstream/original/src/io/source.cpp",
+      "bytes": 2995,
+      "sha256": "5fd4a7accd7fcbd40420fd6adf6c541e580c82ab1ba603ea532b90674dd6896e"
+    },
+    {
+      "path": "upstream/original/src/io/source.hpp",
+      "bytes": 3427,
+      "sha256": "ae408008fc97c77edb668c8506c61fdba9d056f1513bc1e722340d4ec34b6360"
+    },
+    {
+      "path": "upstream/original/src/io/tar.cpp",
+      "bytes": 12920,
+      "sha256": "a26f7ed55fd9b94bb216f0a3c396a4a81a7bff82a1ac8c4ff8c7cd9268397a06"
+    },
+    {
+      "path": "upstream/original/src/io/tar.hpp",
+      "bytes": 3020,
+      "sha256": "0f7ae06580329ac5a0101df58a445a96d3cc6810886463f5613cb2889b342b1a"
+    },
+    {
+      "path": "upstream/original/src/platform/android/app_dirs.cpp",
+      "bytes": 1339,
+      "sha256": "85f52f0a001e5e507d28abcc1f98329a1896e7c38860c6b0a44d54bd0d715f29"
+    },
+    {
+      "path": "upstream/original/src/platform/android/app_dirs.hpp",
+      "bytes": 966,
+      "sha256": "db187e25583b012b6ae2844119977be0b9ac78d51c5e144d029d2e4ad863e0db"
+    },
+    {
+      "path": "upstream/original/src/platform/android/libusb_transport.cpp",
+      "bytes": 12404,
+      "sha256": "e589b5fbae7596fc1481e1f357a10a6b2b1346baf6a4f77955264137974f0c24"
+    },
+    {
+      "path": "upstream/original/src/platform/android/libusb_transport.hpp",
+      "bytes": 3468,
+      "sha256": "6d5c21c3138e83c6de06a1cc2ceca1c36cf6dda58951d29bd8d06b557cb119bf"
+    },
+    {
+      "path": "upstream/original/src/platform/platform_all.hpp",
+      "bytes": 2466,
+      "sha256": "c3e84aa9ea144a71587454b6b42b0426f2b77aee18ce6ed4e62a3213d0a409a1"
+    },
+    {
+      "path": "upstream/original/src/protocol/odin/flash.cpp",
+      "bytes": 12602,
+      "sha256": "ba8094adfb52b9472f5fa256784dfe58ee2a419813e34b1cabed926438c89798"
+    },
+    {
+      "path": "upstream/original/src/protocol/odin/flash.hpp",
+      "bytes": 4101,
+      "sha256": "c0b3806a4839210585f0c2b9a62bb69befb0ecd61d364c503acf2ff88260b24f"
+    },
+    {
+      "path": "upstream/original/src/protocol/odin/group_flasher.cpp",
+      "bytes": 30135,
+      "sha256": "0d9c38ac378de4f95c000dc1ce0766efce168dbe09cd209686e5496226d1bb91"
+    },
+    {
+      "path": "upstream/original/src/protocol/odin/group_flasher.hpp",
+      "bytes": 3400,
+      "sha256": "fb0003568980e37594c37163c1f393b4e4926964042367f3815a3f0a0623de52"
+    },
+    {
+      "path": "upstream/original/src/protocol/odin/odin_cmd.cpp",
+      "bytes": 18798,
+      "sha256": "50afde2ed4dd8396bc27b287cf8d07e103a7134117d196b2b432dc13450da385"
+    },
+    {
+      "path": "upstream/original/src/protocol/odin/odin_cmd.hpp",
+      "bytes": 5028,
+      "sha256": "19edc0d733a548596e46e87f2a1b33c0633556c5198cb3b8d15fe2f0d034cc28"
+    },
+    {
+      "path": "upstream/original/src/protocol/odin/odin_wire.hpp",
+      "bytes": 3691,
+      "sha256": "992ed28f57c49d110e0df4c322fef332d0e5ae38cb61c99c929526536d5fd850"
+    },
+    {
+      "path": "upstream/original/src/protocol/odin/pit.cpp",
+      "bytes": 7396,
+      "sha256": "e335bf169c708f950ee8953316a0ba8187b1d5946ddc3b96c1c935a60c29cba1"
+    },
+    {
+      "path": "upstream/original/src/protocol/odin/pit.hpp",
+      "bytes": 2503,
+      "sha256": "8fd50901ef43586868be4a5905acdc327a30ee836d46feff10ac477062c70b43"
+    },
+    {
+      "path": "upstream/original/src/protocol/odin/pit_transfer.cpp",
+      "bytes": 1587,
+      "sha256": "1062a1e0609e5b37594aa9bb35c2f3918d13cfbc203c36aa49e7c3ff37e1c376"
+    },
+    {
+      "path": "upstream/original/src/protocol/odin/pit_transfer.hpp",
+      "bytes": 1156,
+      "sha256": "61c0d07d2c5265afd77d673ddeb103f1fe34e66c12abcbe5ccbe776e777fe8f7"
+    },
+    {
+      "path": "upstream/original/src/third_party/lz4/LICENSE",
+      "bytes": 1311,
+      "sha256": "8b58c446121a109ccf32edc094bba3010a3d85e4ee3702950db55e4d3e87736c"
+    },
+    {
+      "path": "upstream/original/src/third_party/lz4/lz4.c",
+      "bytes": 19208,
+      "sha256": "00b22ac4ae42969ed373ea082a347384e8135a51993659b5f4b26fbd0b2f981f"
+    },
+    {
+      "path": "upstream/original/src/third_party/lz4/lz4.h",
+      "bytes": 4221,
+      "sha256": "0f28e71d917ef00524dc8eb91e738dcdfc3233ad55d9d053fadcd1bdd0e9d4cb"
+    },
+    {
+      "path": "upstream/original/src/third_party/md5/md5.c",
+      "bytes": 27084,
+      "sha256": "130f868ded0f1b71bba0a05001994c74f4152e42a7422cb31f3d9d5938450a3e"
+    },
+    {
+      "path": "upstream/original/src/third_party/md5/md5.h",
+      "bytes": 1246,
+      "sha256": "a957b48579acf3777ff5c16cc4d7a90c00e4e71f512035409c49de36ab2a49eb"
+    },
+    {
+      "path": "upstream/original/src/third_party/md5/md5_x64.asm",
+      "bytes": 13613,
+      "sha256": "6a104bde600e5de96246190a1768b718c5fa9b60acb95164ae4603e5a6ef8c73"
+    },
+    {
+      "path": "upstream/original/src/third_party/md5/md5_x64_avx512.asm",
+      "bytes": 21766,
+      "sha256": "ccbdbe0bc1c497cfff816353de6ba6379930a1b29908123982401bfe17aa5b5f"
+    },
+    {
+      "path": "upstream/original/src/third_party/xxhash/LICENSE",
+      "bytes": 1389,
+      "sha256": "6ffedbc0f7878612d2b23589f1ff2ab15633e1df7963a5d9fc750ec5500c7e7a"
+    },
+    {
+      "path": "upstream/original/src/third_party/xxhash/xxh_x86dispatch.c",
+      "bytes": 32121,
+      "sha256": "5ebb8caa74c8503826d1e4504e5c614d9fe21169edd0f4032c4771edb3d67e74"
+    },
+    {
+      "path": "upstream/original/src/third_party/xxhash/xxh_x86dispatch.h",
+      "bytes": 4058,
+      "sha256": "ac82561df1d457ea4c8feb17f9df2d53ecf7d99b36b3d2c94cd0bb248e328825"
+    },
+    {
+      "path": "upstream/original/src/third_party/xxhash/xxhash.c",
+      "bytes": 187,
+      "sha256": "3f1b9670ab0d54df9e1e0794c57c8fc33532af5ca936903a46e5a4196520f67b"
+    },
+    {
+      "path": "upstream/original/src/third_party/xxhash/xxhash.h",
+      "bytes": 268319,
+      "sha256": "17973c0dc49d9854ca26caa191f0e12f7a424b68858d9a78de3860d959d85e4b"
+    },
+    {
+      "path": "upstream/original/src/third_party/xxhash/xxhash_dispatch.c",
+      "bytes": 156,
+      "sha256": "09fe70e7e91485a912ca58612f33c21e5e3568a9578b71639f6ac795ce74c1f4"
+    },
+    {
+      "path": "upstream/original/src/third_party/xxhash/xxhash_vendor.h",
+      "bytes": 379,
+      "sha256": "5a80aa3b9dbf1cc25b6dcb42d17846e28a7f04edf7848086223aa4272e4b5a1d"
+    },
+    {
+      "path": "upstream/original/src-jni/shim/fmt/format.h",
+      "bytes": 6265,
+      "sha256": "37ffe60d6c6c335ad6ef47e02ddddf6963a2ee907a3170a2970b5a2c3bd938e9"
+    },
+    {
+      "path": "upstream/original/src-jni/shim/fmt/ranges.h",
+      "bytes": 725,
+      "sha256": "9175a28e97ac7b651b45882d743f73b018bbad5257e4cdfbb86bbcc856ece7cd"
+    },
+    {
+      "path": "upstream/original/src-jni/shim/spdlog/spdlog.h",
+      "bytes": 4798,
+      "sha256": "ff3ccf8ae9f56bd74b74a1209c8a1b1966da3aa2712e6b70bf674ea84cffd078"
+    },
+    {
+      "path": "upstream/provenance.json",
+      "bytes": 10407,
+      "sha256": "4f660b53deb486b909f223532fd86962051ffa0dff9a53c0636678dc58bf698e"
+    },
+    {
+      "path": "usb/LICENSE",
+      "bytes": 1062,
+      "sha256": "a15ff9dccf5edd00da8e92d6cfad79d0fbd9bdfd87ccfa922022a5cacc6d6613"
+    },
+    {
+      "path": "usb/Makefile",
+      "bytes": 620,
+      "sha256": "7e194872bdcdef63a403c97df7f05f9eb0e8d6881e3d22f15c8e708f53d63994"
+    },
+    {
+      "path": "usb/README.md",
+      "bytes": 4939,
+      "sha256": "b5ddb38ad3a6c692e7e4a78ee528cf200eee895cf5c89cda3367f59ef3edb187"
+    },
+    {
+      "path": "usb/brokkr_usb_broker.c",
+      "bytes": 14752,
+      "sha256": "9370e727bf1e942054468fcc2bc2129d4d6f961b4b2b88bfab7fdde2ac36cd84"
+    },
+    {
+      "path": "usb/brokkr_usb_client.c",
+      "bytes": 3535,
+      "sha256": "d74f46156b3bce411b580f7f21f90d7dbe4166dc18502aa35f1a20f34fda8e35"
+    },
+    {
+      "path": "usb/brokkr_usb_client.h",
+      "bytes": 897,
+      "sha256": "2e63287fc6f12ccc7c1b59690be31708e5c1ef92d6084556d5f61b7ac39d2995"
+    },
+    {
+      "path": "usb/metadata.schema.json",
+      "bytes": 1612,
+      "sha256": "6706a984cf18c916c332e71f58697f4fb54ef62dbd3f48f19050b01c84924e60"
+    },
+    {
+      "path": "usb/tests/check_metadata.py",
+      "bytes": 2150,
+      "sha256": "e5af0c8d39fc9876a00984d7a72b8e5183c4ba8c606f3f900cad38e878db0c81"
+    },
+    {
+      "path": "usb/tests/test_usb_broker.c",
+      "bytes": 7193,
+      "sha256": "eaed3e19036513f62a39c1cfeb13b5d5d978e2957210b3a68f5d2f77185c2f5f"
+    },
+    {
+      "path": "verify.py",
+      "bytes": 17547,
+      "sha256": "c21b5c331da11fd0a8e3551566479636e57ae01e23dd3b293f9ba0ce4351c1b8"
+    }
+  ]
+}

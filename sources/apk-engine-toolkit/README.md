@@ -1,6 +1,6 @@
 # APK Engine Toolkit
 
-APK Explorer & Editor bileşenleri ve Running Services Monitor ayrıştırıcılarından hazırlanmış ortak CLI ve MCP araç takımı. Sürüm 0.2.0, toplam 18 araç. Terminal komutları ve MCP araçları aynı motor çekirdeğini, girdi şemalarını ve JSON sonuçlarını kullanır.
+APK Explorer & Editor bileşenleri, Running Services Monitor ayrıştırıcıları ve Brokkr motorundan hazırlanmış ortak CLI ve MCP araç takımı. Sürüm 0.3.0, toplam 27 araç. Terminal komutları ve MCP araçları aynı motor çekirdeğini, girdi şemalarını ve JSON sonuçlarını kullanır.
 
 ## Motorlar
 
@@ -13,6 +13,7 @@ APK Explorer & Editor bileşenleri ve Running Services Monitor ayrıştırıcıl
 | zipalign-java | 1.2.1 | 4 bayt ve 16 KiB ZIP girdi hizalama |
 | RSM ProcessParser | 772e266f-java1 | Servis, LRU süreç ve sistem RAM bilgilerini birleştirme |
 | RSM MemInfoParser | 772e266f-java1 | Sürece ait PSS/RSS, heap, nesne ve tahsis bilgileri |
+| Brokkr native companion | Paketlenen kaynak sürümü | PIT, firmware, MD5 ve USB download-mode işlemleri |
 
 Kaynak seçimleri APK Explorer & Editor v0.36 incelemesine dayanır. zipalign-java 1.2.2 gerçek hizalama testini geçmediği için değiştirilmemiş 1.2.1 kullanılır. aXML portu Android host yardımcılarını ayırır, gerçek KXml2 parser kullanır ve API36.1 Android attribute tablosunu içerir. Ayrı motor paketleri kullanıcının `engine_library` koleksiyonundadır.
 
@@ -60,6 +61,30 @@ Varsayılan ADB komutu `$HOME/.local/bin/phone-adb` yoludur. Farklı bir bağlan
 
 RSM kaynak sürümü `v1.0.27+26`, commit `772e266fb7dd95c76a64b74d10b33af8b95122ab` olarak sabittir. Özgün Dart kaynakları iki bağımsız motor paketinde korunur; bağımlılıksız Java17 uyarlamaları native ELF içine derlenir. Android Intent modülü ayrı `engine_library/android-intent` paketindedir.
 
+## Brokkr firmware ve USB araçları
+
+```sh
+apk-engine parse-pit '{"path":"/absolute/device.pit"}'
+apk-engine inspect-firmware '{"path":"/absolute/AP.tar.md5"}'
+apk-engine verify-firmware '{"path":"/absolute/AP.tar.md5"}'
+apk-engine map-firmware-to-pit '{"pit_path":"/absolute/device.pit","firmware_paths":["/absolute/AP.tar.md5"]}'
+apk-engine open-usb-session '{"device":"/dev/bus/usb/001/002"}'
+apk-engine inspect-usb-session '{}'
+apk-engine probe-device '{}'
+apk-engine flash-firmware '{"firmware_paths":["/absolute/AP.tar.md5"],"reboot":false}'
+apk-engine close-usb-session '{"session":"broker-result-session-token"}'
+```
+
+İlk dört araç dosyaları okur. `verify-firmware` mevcut MD5 trailer'ını doğrular; trailer olmayan girdide `md5_status:absent` ve `md5_verified:false` döner. CLI/MCP sonucu `apk-engine.result/1` içinde özgün `brokkr.result/1` zarfını korur. Yeni araçların girdi ve çıktı şemaları ortak katalogda sunulur; native sonuç şeması derleme sırasında Brokkr paketinden gömülür.
+
+`open-usb-session`, `termux-usb` ile Android USB iznini ister ve gerçek açık descriptor'ı native broker'a aktarır. Sonuç `open` veya izin/callback beklerken `awaiting_permission` olabilir; başlatıcı sonlanırsa `launch_failed` döner. `inspect-usb-session` canlı socket cevabını okur, eski metadata dosyasından açık bağlantı sonucu çıkarmaz. `close-usb-session` yalnızca dönen session kimliğiyle broker'ın descriptor'ını kapatır; daha önce descriptor alan bir native çağrı kendi kopyasını bitişinde kapatır.
+
+`probe-device` download-mode protokolünü başlatıp PIT okur. `flash-firmware` bağlı cihazın bölümlerini yazar. MCP açıklamaları oturum/protokol değişikliklerini yazma işlemi, firmware yazımını ayrıca yıkıcı işlem olarak işaretler. USB descriptor sayıları CLI/MCP girdisi değildir; native motor descriptor'ı broker socket'inden `SCM_RIGHTS` ile alır. Interface ve bulk endpoint'ler tek uygun çift varsa otomatik seçilir; elle seçim için `usb_interface`, `in_endpoint`, `out_endpoint` alanlarının üçünü birlikte verin. IN adresi yön bitini içerir, örneğin `129`; OUT örneği `2`.
+
+Varsayılan broker socket'i `$PREFIX/tmp/brokkr-usb/socket` yoludur. USB araçları alternatif mutlak `socket` yolu alabilir. Termux callback argümanlarını boşlukla ayırdığı için başlatma sırasında broker/socket yolları boşluk ve shell genişletme karakterleri içeremez. Native companion ve broker önce toolkit ELF'inin yanında, sonra `$HOME/engine_library/brokkr` altında aranır. `APK_ENGINE_BROKKR`, `APK_ENGINE_BROKKR_USB_BROKER` ve `APK_ENGINE_TERMUX_USB` mutlak çalıştırılabilir dosya yollarıyla bu seçimi değiştirebilir. Native motor doğrudan çalıştırılır; shell veya JVM aracılığıyla başlatılmaz. Host'un uyumsuz C++ kütüphanesini taşımamak için native subprocess ortamından `LD_LIBRARY_PATH` ve `LD_PRELOAD` kaldırılır.
+
+Brokkr kaynak/lisansları, native executable'ları ve gerekli runtime kütüphaneleri dağıtım girdileridir. Termux'ta yerel üretilen Bionic companion ile CI'ın statik musl çıktısı ayrı build hedefleridir. Yeni kaynak veya JAR doğrulaması, kurulu `apk-engine` ELF'inin güncellendiği anlamına gelmez. MCP kataloğu süreç başlangıcında sabittir (`listChanged:false`); yeni executable kurulduktan sonra istemci server sürecini yeniden başlatmalıdır.
+
 ## MCP
 
 ```sh
@@ -83,11 +108,11 @@ MCP istemci kaydı:
 
 ## Derleme ve doğrulama
 
-`build.py --library /absolute/engine_library` Java17 uyumlu `dist/apk-engine.jar` ara çıktısını üretir. `dist/build.json` kaynak ve bağımlılık SHA256 kayıtlarını tutar. Ara çıktı `java -jar dist/apk-engine.jar` ile geliştirme/test amacıyla çalıştırılabilir.
+`build.py --library /absolute/engine_library` Java17 uyumlu `dist/apk-engine.jar` ara çıktısını üretir. `dist/build.json` kaynak ve bağımlılık SHA256 kayıtlarını tutar. Ara çıktı `java -jar dist/apk-engine.jar` ile geliştirme/test amacıyla çalıştırılabilir. Derleme ayrıca `engine_library/brokkr/schemas/result.schema.json` dosyasını gerektirir; çalıştırma native companion executable'larını kullanır.
 
 Native workflow BellSoft Native Image ARM64 musl toolchain'i kullanır. Hedef gerçek statik Linux AArch64 ELF'tir; haricî JVM veya launcher içermez. ELF başlığı, dinamik yükleyici/bağımlılık bulunmaması ve ortak CLI/MCP testleri ayrı doğrulanır. Android/Termux çalıştırma kanıtı indirilen aynı artifact üzerinde ayrıca kaydedilir.
 
-`tests/verify_toolkit.py` aynı testleri JVM ara çıktısına veya native executable'a uygular. ZIP/DEX/XML roundtrip, gerçek hizalama ofsetleri, APK imzası ve değiştirilmiş dosya reddi, JSON girdi biçimleri, MCP görüşmesi, RSM ayrıştırma örnekleri, gerçek alt süreç üzerinden kontrollü ADB yanıtları ve bütün araçların çağrılmasını kapsar. Geçici test anahtarları/dosyaları kaldırılır.
+`tests/verify_toolkit.py` aynı testleri JVM ara çıktısına veya native executable'a uygular. ZIP/DEX/XML roundtrip, gerçek hizalama ofsetleri, APK imzası ve değiştirilmiş dosya reddi, JSON girdi biçimleri, MCP görüşmesi, RSM ayrıştırma örnekleri, gerçek alt süreç üzerinden kontrollü ADB yanıtları ve bütün araçların çağrılmasını kapsar. Brokkr testleri gerçek native companion ile sentetik PIT/TAR/MD5 girdilerini, checksum hata yolunu, typed sonuç şemalarını ve native broker üzerinden gerçek descriptor aktarımını kapsar. USB fixture'ı normal dosyadır: `probe-device` ve `flash-firmware` native USB sınırına ulaşır ve USB olmayan descriptor'ı reddeder. Bu testler fiziksel cihaz probe/flash başarısı kanıtı değildir. Test runner `jsonschema` Python paketini gerektirir. Geçici test anahtarları/dosyaları kaldırılır.
 
 ARSC aracı aXML'in sunduğu kimlik, isim ve değerleri döndürür; complex bag ve bütün locale varyantlarını tam çözmez. Binary XML encoder desteklemediği metin düğümlerini ve bilinmeyen Android attribute isimlerini hata ile bildirir.
 

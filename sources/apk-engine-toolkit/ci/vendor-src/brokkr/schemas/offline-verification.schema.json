@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:brokkr:offline-verification:1",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "brokkr.offline-verification/1"
+    },
+    "producer": {
+      "const": "brokkr/verify.py"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "interface": {
+            "enum": [
+              "cli",
+              "c-api",
+              "fixture",
+              "schema",
+              "policy"
+            ]
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "interface",
+          "ok",
+          "detail"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "candidate": {
+      "type": "object",
+      "properties": {
+        "requested": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tested": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requested",
+        "path",
+        "tested",
+        "detail"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "requested": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "tested": {
+                "const": false
+              },
+              "path": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "semantic_review": {
+      "type": "string"
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "producer",
+    "generated_at",
+    "ok",
+    "checks",
+    "artifacts",
+    "candidate",
+    "semantic_review",
+    "limitations"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "checks": {
+            "items": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "checks": {
+            "contains": {
+              "properties": {
+                "ok": {
+                  "const": false
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

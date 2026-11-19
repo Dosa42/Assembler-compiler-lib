@@ -1,0 +1,68 @@
+name: Build APK Engine Toolkit ARM64
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - sources/apk-engine-toolkit/**
+      - .github/workflows/build-apk-engine-toolkit-arm64.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apk-engine-toolkit-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: sources/apk-engine-toolkit
+      - name: Build and verify static AArch64 toolkit and Brokkr companions
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          docker run --rm --platform linux/arm64 --cpus 2 --memory 7g --memory-swap 7g \
+            --volume "$GITHUB_WORKSPACE:/repo" \
+            --workdir /repo/sources/apk-engine-toolkit \
+            --env GITHUB_SHA --env GITHUB_REPOSITORY --env GITHUB_RUN_ID \
+            alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf \
+            sh -ec 'apk add --no-cache bash g++ make cmake pkgconf libusb-dev zlib-static curl ca-certificates tar file binutils python3 py3-jsonschema xz
+          python3 ci/native_build.py'
+      - name: Upload verified native archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: apk-engine-toolkit-ubuntu-24.04-arm64
+          path: |
+            sources/apk-engine-toolkit/dist/apk-engine-toolkit-ubuntu-24.04-arm64.tar.xz
+            sources/apk-engine-toolkit/dist/apk-engine-toolkit-ubuntu-24.04-arm64.tar.xz.sha256
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload build and test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: apk-engine-toolkit-arm64-evidence
+          path: |
+            sources/apk-engine-toolkit/evidence/*.json
+            sources/apk-engine-toolkit/evidence/*.log
+            sources/apk-engine-toolkit/ci/generated-config/
+          if-no-files-found: warn
+          retention-days: 30
+  publish:
+    needs: build
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/publish-all-dist.yml
+    with:
+      component: apk-engine-toolkit
+      run_id: ${{ github.run_id }}

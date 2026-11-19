@@ -12,12 +12,14 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 import zipfile
+import jsonschema
 from datetime import datetime, timezone
 from pathlib import Path
+from brokkr_cases import BROKKR_TOOLS, BrokkrCases
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-TOOLS = {"inspect_apk", "list_entries", "extract_entries", "create_archive", "align_apk", "check_alignment", "list_dex_classes", "disassemble_dex", "assemble_dex", "decode_xml", "encode_xml", "inspect_resources", "verify_apk", "sign_apk", "parse_process_snapshot", "parse_meminfo", "inspect_android_processes", "inspect_android_meminfo"}
+TOOLS = {"inspect_apk", "list_entries", "extract_entries", "create_archive", "align_apk", "check_alignment", "list_dex_classes", "disassemble_dex", "assemble_dex", "decode_xml", "encode_xml", "inspect_resources", "verify_apk", "sign_apk", "parse_process_snapshot", "parse_meminfo", "inspect_android_processes", "inspect_android_meminfo"} | BROKKR_TOOLS
 PAYLOAD = b"apk-engine-integration-payload-unique-v1\n"
 MONITOR_FIXTURES = PROJECT / "tests/fixtures/monitor"
 
@@ -105,7 +107,7 @@ def resource_table():
     return binary_chunk(2, 12, struct.pack("<I", 1) + global_pool + package)
 
 
-class Suite:
+class Suite(BrokkrCases):
     def __init__(self, args, work):
         self.args = args
         self.work = work
@@ -552,6 +554,7 @@ class Suite:
             ("parse_meminfo", {"path": str(MONITOR_FIXTURES / "android16.txt"), "raw_output": True}),
             ("inspect_android_processes", {}),
             ("inspect_android_meminfo", {"package": "dev.example.meminfo"})]
+        operations.extend(self.brokkr_arguments.items())
         for identifier, (name, arguments) in enumerate(operations, 10):
             rpc(identifier, "tools/call", {"name": name, "arguments": arguments})
             expected[identifier] = name
@@ -586,6 +589,10 @@ class Suite:
             require(structured["tool"] == name, "MCP tool identity mismatch")
             require(json.loads(result["content"][0]["text"]) == structured, "MCP text and structured content disagree")
             self.mcp_tools.add(name)
+            if name in self.brokkr_arguments:
+                self.brokkr_validate_output(name, structured)
+                self.brokkr_assert(name, structured["result"])
+                self.brokkr_executions.append({"transport": "mcp", "tool": name, "expected_native_error": False})
         require(by_id[100]["result"]["isError"] is True, "Engine failure lacks isError")
         for identifier in [101, 102, 103, 105, 106, 108, 110, 111, 112]:
             require(by_id[identifier]["error"]["code"] == -32602, "Bad params not distinguished from engine failure")
@@ -642,7 +649,7 @@ class Suite:
 
 def policy_check():
     scanner_path = Path.home() / ".codex/goal-core/comment-policy/scanner.py"
-    rule = Path.home() / ".codex/RULES/no-comments.json"
+    rule = Path.home() / ".codex/RULES/comment-documentation.json"
     if not scanner_path.is_file() or not rule.is_file():
         return {"required_for_current_host": False, "passed": None, "status": "unavailable", "reason": "Canonical managed-agent scanner is external to this portable runtime test harness"}
     sys.dont_write_bytecode = True
@@ -650,7 +657,7 @@ def policy_check():
     scanner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(scanner)
     scanner.load_rule(rule)
-    paths = [Path(__file__).resolve(), PROJECT / "tests/monitor_fixture.py", PROJECT / "src/main/java/dev/ayrvokan/apkengine/AndroidInspectionTools.java"]
+    paths = [Path(__file__).resolve(), PROJECT / "tests/brokkr_cases.py", PROJECT / "tests/brokkr_usb_fixture.py", PROJECT / "src/main/java/dev/ayrvokan/apkengine/BrokkrTools.java", PROJECT / "src/main/java/dev/ayrvokan/apkengine/Main.java", PROJECT / "build.py"]
     results = [scanner.scan(path, path.read_text()) for path in paths]
     return {"required_for_current_host": True, "policy_path": str(rule), "policy_sha256": digest(rule), "scanner_sha256": digest(scanner_path), "results": results, "passed": all(not result["findings"] and not result["errors"] for result in results)}
 
@@ -676,12 +683,12 @@ def main():
         suite = Suite(args, Path(temporary))
         suite.case("prepare_isolated_fixtures", suite.prepare)
         if suite.cases[-1]["passed"]:
-            for name, action in [("catalog_and_schemas", suite.schemas), ("zip_extract_repack_alignment", suite.archives), ("binary_xml_and_arsc", suite.xml_resources), ("smali_dex_roundtrip", suite.dex_roundtrip), ("sign_verify_tamper", suite.signing), ("cli_errors_and_output_preservation", suite.error_conditions), ("android_saved_parsers", suite.android_parsers), ("android_exact_package_filter", suite.android_package_filter), ("android_live_subprocesses", suite.android_live), ("android_termux_default_helper", suite.android_termux_default), ("android_input_and_subprocess_failures", suite.android_errors), ("mcp_all_tools_and_protocol", suite.mcp), ("mcp_android_subprocess_failures", suite.mcp_android_failures), ("mcp_invalid_request", suite.mcp_invalid_request)]:
+            for name, action in [("catalog_and_schemas", suite.schemas), ("zip_extract_repack_alignment", suite.archives), ("binary_xml_and_arsc", suite.xml_resources), ("smali_dex_roundtrip", suite.dex_roundtrip), ("sign_verify_tamper", suite.signing), ("cli_errors_and_output_preservation", suite.error_conditions), ("android_saved_parsers", suite.android_parsers), ("android_exact_package_filter", suite.android_package_filter), ("android_live_subprocesses", suite.android_live), ("android_termux_default_helper", suite.android_termux_default), ("android_input_and_subprocess_failures", suite.android_errors), ("brokkr_native_offline", suite.brokkr_offline), ("brokkr_native_usb_cli", suite.brokkr_usb_cli), ("mcp_all_tools_and_protocol", suite.mcp), ("brokkr_native_usb_mcp", suite.brokkr_mcp_usb), ("mcp_android_subprocess_failures", suite.mcp_android_failures), ("mcp_invalid_request", suite.mcp_invalid_request)]:
                 suite.case(name, action)
             if args.reference_apk:
                 suite.case("real_aee_reference", suite.real_reference)
             suite.case("read_only_inputs_preserved", suite.unchanged)
-        record.update({"target": str(suite.target), "target_sha256": suite.protected.get(str(suite.target)), "cases": suite.cases, "cli_coverage": sorted(suite.cli_tools), "mcp_coverage": sorted(suite.mcp_tools), "expected_tools": sorted(TOOLS), "protected_inputs": suite.protected, "calls": suite.calls, "controlled_android_child_processes": suite.monitor_records()})
+        record.update({"target": str(suite.target), "target_sha256": suite.protected.get(str(suite.target)), "cases": suite.cases, "cli_coverage": sorted(suite.cli_tools), "mcp_coverage": sorted(suite.mcp_tools), "expected_tools": sorted(TOOLS), "protected_inputs": suite.protected, "calls": suite.calls, "controlled_android_child_processes": suite.monitor_records(), "brokkr_executions": getattr(suite, "brokkr_executions", []), "brokkr_usb_scope": "regular-file SCM_RIGHTS fixture; probe and flash execute native rejection; no physical USB"})
         record["native_executed"] = bool(args.executable and any(call["command"][0] == str(suite.target) for call in suite.calls))
     record["fixtures_keys_and_scratch_removed"] = not Path(temporary).exists()
     try:
@@ -690,6 +697,9 @@ def main():
         record["comment_policy"] = {"passed": False, "error": type(error).__name__ + ": " + str(error)}
     policy_satisfied = record["comment_policy"].get("required_for_current_host") is False or record["comment_policy"]["passed"] is True
     record["passed"] = all(case["passed"] for case in record["cases"]) and set(record["cli_coverage"]) == TOOLS and set(record["mcp_coverage"]) == TOOLS and policy_satisfied and record["fixtures_keys_and_scratch_removed"]
+    evidence_schema = json.loads((PROJECT / "tests/integration.schema.json").read_text())
+    jsonschema.Draft202012Validator.check_schema(evidence_schema)
+    jsonschema.Draft202012Validator(evidence_schema).validate(record)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(record, indent=2) + "\n")
     print(json.dumps({"passed": record["passed"], "execution_kind": record["execution_kind"], "cli_tools": len(record["cli_coverage"]), "mcp_tools": len(record["mcp_coverage"]), "evidence": str(output)}, indent=2))

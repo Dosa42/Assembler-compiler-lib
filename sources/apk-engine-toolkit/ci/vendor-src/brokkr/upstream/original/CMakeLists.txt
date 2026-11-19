@@ -1,0 +1,635 @@
+cmake_minimum_required(VERSION 3.22)
+project(Brokkr LANGUAGES C CXX VERSION 2.5.0)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# -----------------------------
+# Dependencies (FetchContent)
+# -----------------------------
+if (NOT ANDROID)
+    include(FetchContent)
+
+    set(FMT_TEST OFF CACHE BOOL "disabling fmt tests" FORCE)
+
+    FetchContent_Declare(
+       spdlog
+       GIT_REPOSITORY https://github.com/gabime/spdlog.git
+       GIT_TAG        v1.17.0
+       GIT_PROGRESS    TRUE
+       USES_TERMINAL_DOWNLOAD TRUE
+    )
+    FetchContent_GetProperties(spdlog)
+    if (NOT spdlog_POPULATED)
+        FetchContent_MakeAvailable(spdlog)
+    endif()
+
+    # Important: Match the fmt version with spdlog's bundled version to avoid ODR issues.
+    FetchContent_Declare(
+        fmt
+        GIT_REPOSITORY  https://github.com/fmtlib/fmt.git
+        GIT_TAG         12.1.0
+        GIT_PROGRESS    TRUE
+         USES_TERMINAL_DOWNLOAD TRUE
+    )
+    FetchContent_GetProperties(fmt)
+    if (NOT fmt_POPULATED)
+        FetchContent_MakeAvailable(fmt)
+    endif()
+endif()
+
+# -----------------------------------------------
+# Enable Hot Reload for MSVC compilers if supported
+# -----------------------------------------------
+if (POLICY CMP0141)
+  cmake_policy(SET CMP0141 NEW)
+  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT
+      "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:MSVC>>,\
+$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,\
+$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
+endif()
+
+# ---------------------------
+# Check modern C++ features
+# ---------------------------
+include(CheckCXXSourceCompiles)
+
+set(BYTESWAP_SRC
+"#include <version>
+#if defined(__cpp_lib_byteswap) && __cpp_lib_byteswap >= 201907L
+#include <bit>
+int main() {
+    std::byteswap(0x12345678);
+    return 0;
+}
+#else
+#error \"__cpp_lib_byteswap not supported\"
+#endif")
+check_cxx_source_compiles("${BYTESWAP_SRC}" HAS_BYTESWAP)
+if (NOT HAS_BYTESWAP)
+    message(FATAL_ERROR "Compiler does not support __cpp_lib_byteswap, which is required")
+endif()
+
+# -------------------------------------------------------------------
+# std::move_only_function compatibility
+# -------------------------------------------------------------------
+set(MOF_SRC
+"#include <functional>
+int main() { std::move_only_function<void()> f; return 0; }")
+if (NOT ANDROID)
+    check_cxx_source_compiles("${MOF_SRC}" HAS_STD_MOVE_ONLY_FUNCTION)
+endif()
+
+if (NOT ANDROID AND NOT HAS_STD_MOVE_ONLY_FUNCTION)
+    message(STATUS "std::move_only_function not available; enabling polyfill via function2")
+
+    FetchContent_Declare(
+        function2
+        GIT_REPOSITORY https://github.com/Naios/function2.git
+        GIT_TAG        4.2.2
+    )
+    FetchContent_GetProperties(function2)
+    if (NOT function2_POPULATED)
+        FetchContent_MakeAvailable(function2)
+    endif()
+
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    set(BROKKR_MOF_SHIM "${CMAKE_CURRENT_BINARY_DIR}/generated/brokkr_move_only_function_shim.hpp")
+
+    file(WRITE "${BROKKR_MOF_SHIM}" [==[
+#pragma once
+#include <functional>
+#include <function2/function2.hpp>
+
+namespace std {
+template <class Sig>
+using move_only_function = fu2::unique_function<Sig>;
+} // namespace std
+]==])
+endif()
+
+# -----------------------------------------
+# Platform-specific source files and definitions
+# -----------------------------------------
+if (ANDROID)
+    set(BROKKR_ANDROID_LIBUSB_TARGET "usb-1.0" CACHE STRING
+        "Name of the CMake target providing libusb-1.0 for the Android build")
+    if (NOT TARGET ${BROKKR_ANDROID_LIBUSB_TARGET})
+        message(FATAL_ERROR
+            "Android build requires a libusb-1.0 target named '${BROKKR_ANDROID_LIBUSB_TARGET}'. "
+            "Define it before add_subdirectory(), or set BROKKR_ANDROID_LIBUSB_TARGET.")
+    endif()
+
+    add_library(brokkr-platform INTERFACE)
+    target_compile_definitions(brokkr-platform INTERFACE BROKKR_PLATFORM_ANDROID _FILE_OFFSET_BITS=64)
+    target_sources(brokkr-platform INTERFACE
+        src/platform/android/app_dirs.cpp
+        src/platform/android/java_tcp_transport.cpp
+        src/platform/android/libusb_transport.cpp
+    )
+    target_link_libraries(brokkr-platform INTERFACE
+        android
+        log
+        ${BROKKR_ANDROID_LIBUSB_TARGET}
+    )
+elseif (LINUX OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_library(brokkr-platform INTERFACE)
+    target_compile_definitions(brokkr-platform INTERFACE BROKKR_PLATFORM_LINUX)
+    target_sources(brokkr-platform INTERFACE
+        src/platform/posix-common/app_dirs.cpp
+        src/platform/posix-common/signal_shield.cpp
+        src/platform/posix-common/single_instance.cpp
+        src/platform/posix-common/tcp_transport.cpp
+        src/platform/posix-common/serial_port.cpp
+        src/platform/linux/sysfs_usb.cpp
+        src/platform/linux/usbfs_device.cpp
+        src/platform/linux/usbfs_conn.cpp
+    )
+elseif (WIN32)
+    add_library(brokkr-platform INTERFACE)
+    target_compile_definitions(brokkr-platform INTERFACE
+        BROKKR_PLATFORM_WINDOWS
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+    )
+    target_sources(brokkr-platform INTERFACE
+        src/platform/windows/app_dirs.cpp
+        src/platform/windows/signal_shield.cpp
+        src/platform/windows/single_instance.cpp
+        src/platform/windows/serial_port.cpp
+        src/platform/windows/sysfs_usb.cpp
+        src/platform/windows/usbfs_device.cpp
+        src/platform/windows/usbfs_conn.cpp
+        src/platform/windows/tcp_transport.cpp
+    )
+elseif (APPLE)
+    add_library(brokkr-platform INTERFACE)
+    target_compile_definitions(brokkr-platform INTERFACE BROKKR_PLATFORM_MACOS)
+    target_sources(brokkr-platform INTERFACE
+        src/platform/posix-common/app_dirs.cpp
+        src/platform/posix-common/signal_shield.cpp
+        src/platform/posix-common/single_instance.cpp
+        src/platform/posix-common/tcp_transport.cpp
+        src/platform/posix-common/serial_port.cpp
+        src/platform/macos/sysfs_usb.cpp
+        src/platform/macos/usbfs_device.cpp
+        src/platform/macos/usbfs_conn.cpp
+    )
+    target_link_libraries(brokkr-platform INTERFACE
+        "-framework IOKit"
+        "-framework CoreFoundation"
+    )
+else()
+    message(FATAL_ERROR "Unsupported platform")
+endif()
+
+target_include_directories(brokkr-platform INTERFACE src)
+if (ANDROID)
+    target_include_directories(brokkr-platform INTERFACE src-jni/shim)
+else()
+    target_link_libraries(brokkr-platform INTERFACE spdlog::spdlog_header_only fmt::fmt-header-only)
+endif()
+
+add_library(brokkr-lib INTERFACE)
+target_sources(brokkr-lib INTERFACE
+    src/core/thread_pool.cpp
+    src/io/random_access.cpp
+    src/io/sequential_reader.cpp
+    src/io/tar.cpp
+    src/io/source.cpp
+    src/io/lz4_frame.cpp
+    src/third_party/md5/md5.c
+    src/third_party/xxhash/xxhash.c
+    src/third_party/xxhash/xxhash_dispatch.c
+    src/third_party/lz4/lz4.c
+    src/protocol/odin/odin_cmd.cpp
+    src/protocol/odin/pit.cpp
+    src/protocol/odin/flash.cpp
+    src/protocol/odin/group_flasher.cpp
+    src/protocol/odin/pit_transfer.cpp
+    src/app/md5_xxh3_cache.cpp
+    src/app/md5_verify.cpp
+)
+
+if (MSVC AND NOT CMAKE_C_COMPILER_ID STREQUAL "Clang" AND CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+    enable_language(ASM_MASM)
+    add_library(brokkr-md5-asm OBJECT src/third_party/md5/md5_x64.asm src/third_party/md5/md5_x64_avx512.asm)
+    target_sources(brokkr-lib INTERFACE $<TARGET_OBJECTS:brokkr-md5-asm>)
+    target_compile_definitions(brokkr-lib INTERFACE BROKKR_MD5_X64_ASM)
+endif()
+
+include(TestBigEndian)
+test_big_endian(BROKKR_IS_BIG_ENDIAN)
+if (BROKKR_IS_BIG_ENDIAN)
+    target_compile_definitions(brokkr-lib INTERFACE BROKKR_BIG_ENDIAN)
+endif()
+
+# -----------------------------------------------
+# Android: JNI shared library
+# -----------------------------------------------
+if (ANDROID)
+    add_library(brokkr SHARED src-jni/brokkr_android_jni.cpp)
+    target_include_directories(brokkr PRIVATE src src-jni/shim)
+    target_link_libraries(brokkr PRIVATE brokkr-platform brokkr-lib)
+    return()
+endif()
+
+# ---------------------------
+# Qt6 Detection
+# ---------------------------
+find_package(Qt6 6.8 COMPONENTS Core Gui Widgets)
+
+if (NOT Qt6_FOUND)
+    message(FATAL_ERROR "Qt6 is required for the GUI target. Please install Qt6 and try again.")
+endif()
+message(STATUS "Qt6 found, enabling GUI target 'brokkr'")
+
+# ── macOS: strip frameworks the SDK no longer ships ───────────────
+# macOS 14+/15+ SDK removed AGL.framework.  Qt's imported targets
+# and .prl files may still reference it.  Walk EVERY imported
+# target and surgically remove entries that mention a missing
+# framework.  Uses string(REPLACE) to catch both single-element
+# ("-framework AGL") and two-element ("-framework" ; "AGL") forms.
+# ------------------------------------------------------------------
+if (APPLE)
+    set(_BROKKR_MISSING_FW "")
+    foreach(_fw IN ITEMS AGL)
+        find_library(_brokkr_probe_${_fw} ${_fw})
+        if (NOT _brokkr_probe_${_fw})
+            list(APPEND _BROKKR_MISSING_FW ${_fw})
+            message(STATUS "${_fw}.framework not in SDK – stripping from all imported targets")
+        endif()
+        unset(_brokkr_probe_${_fw} CACHE)
+    endforeach()
+
+    if (_BROKKR_MISSING_FW)
+        function(_brokkr_strip_fw tgt)
+            if (NOT TARGET ${tgt})
+                return()
+            endif()
+            foreach(prop IN ITEMS INTERFACE_LINK_LIBRARIES INTERFACE_LINK_OPTIONS)
+                get_target_property(_val ${tgt} ${prop})
+                if (NOT _val)
+                    continue()
+                endif()
+                set(_orig "${_val}")
+                foreach(_fw IN LISTS _BROKKR_MISSING_FW)
+                    # Single-element: "-framework AGL"
+                    string(REPLACE ";-framework ${_fw}" "" _val "${_val}")
+                    string(REPLACE "-framework ${_fw};" "" _val "${_val}")
+                    string(REPLACE "-framework ${_fw}"  "" _val "${_val}")
+                    # Two-element: "-framework" ; "AGL"  (semicolon-separated)
+                    string(REPLACE ";-framework;${_fw}" "" _val "${_val}")
+                    string(REPLACE "-framework;${_fw};" "" _val "${_val}")
+                    string(REPLACE "-framework;${_fw}"  "" _val "${_val}")
+                endforeach()
+                if (NOT "${_val}" STREQUAL "${_orig}")
+                    message(STATUS "  stripped missing framework(s) from ${tgt}::${prop}")
+                endif()
+                set_target_properties(${tgt} PROPERTIES ${prop} "${_val}")
+            endforeach()
+        endfunction()
+
+        # Walk every imported target (catches Qt6::GuiPrivate, Qt6::Platform, etc.)
+        get_property(_all_imported DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY IMPORTED_TARGETS)
+        foreach(_tgt IN LISTS _all_imported)
+            _brokkr_strip_fw(${_tgt})
+        endforeach()
+    endif()
+endif()
+# ── end macOS framework fixup ─────────────────────────────────────
+
+if (WIN32)
+    add_executable(brokkr
+        src-gui/main_gui.cpp
+        src/app/cli_mode.hpp
+        src/app/cli_mode.cpp
+        src/app/download_mode.hpp
+        src/app/download_mode.cpp
+        src-gui/brokkr_wrapper.hpp
+        src-gui/brokkr_wrapper.cpp
+        assets/icon.rc
+        assets/brokkr.qrc
+    )
+elseif (APPLE)
+   set(MACOSX_BUNDLE_ICON_FILE brokkr.icns)
+   set_source_files_properties(assets/brokkr.icns PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+    add_executable(brokkr MACOSX_BUNDLE
+        src-gui/main_gui.cpp
+        src/app/cli_mode.hpp
+        src/app/cli_mode.cpp
+        src/app/download_mode.hpp
+        src/app/download_mode.cpp
+        src-gui/brokkr_wrapper.hpp
+        src-gui/brokkr_wrapper.cpp
+        assets/brokkr.qrc
+        assets/brokkr.icns
+    )
+else()
+    add_executable(brokkr
+        src-gui/main_gui.cpp
+        src/app/cli_mode.hpp
+        src/app/cli_mode.cpp
+        src/app/download_mode.hpp
+        src/app/download_mode.cpp
+        src-gui/brokkr_wrapper.hpp
+        src-gui/brokkr_wrapper.cpp
+        assets/brokkr.qrc
+    )
+endif()
+
+find_package(Threads REQUIRED)
+target_include_directories(brokkr PRIVATE src src-gui)
+target_sources(brokkr PRIVATE src/app/cli_args.cpp)
+
+add_library(brokkr-cxx-compat INTERFACE)
+if (NOT HAS_STD_MOVE_ONLY_FUNCTION)
+    target_include_directories(brokkr-cxx-compat INTERFACE "${function2_SOURCE_DIR}/include")
+    if (MSVC)
+        target_compile_options(brokkr-cxx-compat INTERFACE
+            $<$<COMPILE_LANGUAGE:CXX>:/FI${BROKKR_MOF_SHIM}>
+        )
+    else()
+        target_compile_options(brokkr-cxx-compat INTERFACE
+            $<$<COMPILE_LANGUAGE:CXX>:-include>
+            $<$<COMPILE_LANGUAGE:CXX>:${BROKKR_MOF_SHIM}>
+        )
+    endif()
+endif()
+
+target_link_libraries(brokkr PRIVATE
+    brokkr-cxx-compat
+    Threads::Threads
+    spdlog::spdlog_header_only
+    fmt::fmt-header-only
+    brokkr-platform
+    brokkr-lib
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
+)
+
+set_target_properties(brokkr PROPERTIES AUTOMOC ON AUTORCC ON)
+
+if (WIN32)
+    target_link_libraries(brokkr PRIVATE dwmapi shell32)
+    target_compile_definitions(brokkr PRIVATE SPDLOG_WCHAR_TO_UTF8_SUPPORT SPDLOG_UTF8_TO_WCHAR_CONSOLE)
+endif()
+
+if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    target_compile_options(brokkr-cxx-compat INTERFACE /Zc:__cplusplus)
+endif()
+
+if(WIN32)
+    get_target_property(_qmake_exec Qt6::qmake IMPORTED_LOCATION)
+    get_filename_component(_qt_bin_dir "${_qmake_exec}" DIRECTORY)
+    find_program(WINDEPLOYQT_EXEC windeployqt HINTS "${_qt_bin_dir}")
+    if(WINDEPLOYQT_EXEC)
+        add_custom_command(TARGET brokkr POST_BUILD
+            COMMAND "${WINDEPLOYQT_EXEC}"
+            ARGS --no-translations --no-compiler-runtime "$<TARGET_FILE:brokkr>"
+            COMMENT "Running windeployqt to deploy Qt libraries..."
+        )
+    else()
+        message(WARNING "windeployqt not found! You will need to copy DLLs manually.")
+    endif()
+endif()
+
+if (NOT WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_definitions(brokkr PRIVATE _FILE_OFFSET_BITS=64 _LARGEFILE_SOURCE)
+    target_compile_options(brokkr PRIVATE
+        $<$<CONFIG:Release,RelWithDebInfo>:-O3 -ffunction-sections -fdata-sections>
+    )
+endif()
+
+include(CheckIPOSupported)
+check_ipo_supported(RESULT LTO_SUPPORTED)
+if (LTO_SUPPORTED)
+    message(STATUS "Enabling LTO (Link time optimization)")
+    set_target_properties(brokkr PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+# Versioning
+set(BROKKR_VERSION_SUFFIX "" CACHE STRING "Pre-release label shown in the UI instead of 'rel' (for example beta1)")
+
+if (BROKKR_VERSION_SUFFIX)
+    set(BROKKR_RELEASE_LABEL "${BROKKR_VERSION_SUFFIX}")
+else()
+    set(BROKKR_RELEASE_LABEL "rel")
+endif()
+
+execute_process(
+    COMMAND git rev-list --count ${PROJECT_VERSION}..HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE BROKKR_COMMIT_COUNT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT BROKKR_COMMIT_COUNT)
+    set(BROKKR_COMMIT_COUNT "0")
+endif()
+
+if (CMAKE_BUILD_TYPE)
+    message(STATUS "Version: v${PROJECT_VERSION}-${BROKKR_RELEASE_LABEL}+${BROKKR_COMMIT_COUNT}-${CMAKE_BUILD_TYPE}")
+else()
+    message(STATUS "Version: v${PROJECT_VERSION}-${BROKKR_RELEASE_LABEL}+${BROKKR_COMMIT_COUNT}")
+endif()
+
+target_compile_definitions(brokkr PRIVATE
+    BROKKR_COMMIT_COUNT=\"${BROKKR_COMMIT_COUNT}\"
+    BROKKR_BUILD_TYPE=\"$<IF:$<CONFIG:Debug>,dbg,${BROKKR_RELEASE_LABEL}>\"
+    BROKKR_VERSION=\"${PROJECT_VERSION}\"
+)
+
+if(WIN32)
+    set(BROKKR_DEPLOY_TOOL_OPTIONS DEPLOY_TOOL_OPTIONS --no-compiler-runtime)
+endif()
+qt_generate_deploy_app_script(
+    TARGET brokkr
+    OUTPUT_SCRIPT deploy_script
+    NO_UNSUPPORTED_PLATFORM_ERROR
+    ${BROKKR_DEPLOY_TOOL_OPTIONS}
+)
+install(SCRIPT ${deploy_script})
+install(TARGETS brokkr
+    RUNTIME DESTINATION bin
+    BUNDLE  DESTINATION .
+)
+
+# ── Tests ─────────────────────────────────────────────────────────────
+enable_testing()
+
+add_executable(test_md5
+    tests/test_md5.cpp
+    src/third_party/md5/md5.c
+)
+target_include_directories(test_md5 PRIVATE src)
+if (TARGET brokkr-md5-asm)
+    target_sources(test_md5 PRIVATE $<TARGET_OBJECTS:brokkr-md5-asm>)
+    target_compile_definitions(test_md5 PRIVATE BROKKR_MD5_X64_ASM)
+endif()
+add_test(NAME md5 COMMAND test_md5)
+
+add_executable(test_md5_xxh3_cache
+    tests/test_md5_xxh3_cache.cpp
+    src/app/md5_xxh3_cache.cpp
+)
+target_include_directories(test_md5_xxh3_cache PRIVATE src)
+target_link_libraries(test_md5_xxh3_cache PRIVATE fmt::fmt-header-only)
+add_test(NAME md5_xxh3_cache COMMAND test_md5_xxh3_cache)
+
+add_executable(test_endian tests/test_endian.cpp)
+target_include_directories(test_endian PRIVATE src)
+add_test(NAME endian COMMAND test_endian)
+
+if (WIN32)
+    set(BROKKR_TEST_TCP_TRANSPORT src/platform/windows/tcp_transport.cpp)
+else()
+    set(BROKKR_TEST_TCP_TRANSPORT src/platform/posix-common/tcp_transport.cpp)
+endif()
+add_executable(test_tcp_recv_buffered
+    tests/test_tcp_recv_buffered.cpp
+    ${BROKKR_TEST_TCP_TRANSPORT}
+)
+target_include_directories(test_tcp_recv_buffered PRIVATE src)
+target_compile_definitions(test_tcp_recv_buffered PRIVATE
+    $<TARGET_PROPERTY:brokkr-platform,INTERFACE_COMPILE_DEFINITIONS>
+)
+target_link_libraries(test_tcp_recv_buffered PRIVATE
+    Threads::Threads spdlog::spdlog_header_only fmt::fmt-header-only
+)
+add_test(NAME tcp_recv_buffered COMMAND test_tcp_recv_buffered)
+
+if (NOT WIN32)
+    add_executable(test_signal_shield
+        tests/test_signal_shield.cpp
+        src/platform/posix-common/signal_shield.cpp
+    )
+    target_include_directories(test_signal_shield PRIVATE src)
+    target_link_libraries(test_signal_shield PRIVATE Threads::Threads)
+    add_test(NAME signal_shield COMMAND test_signal_shield)
+    set_tests_properties(signal_shield PROPERTIES TIMEOUT 120)
+endif()
+
+add_executable(test_file_paths
+    tests/test_file_paths.cpp
+    src/core/thread_pool.cpp
+    src/io/random_access.cpp
+    src/io/sequential_reader.cpp
+    src/io/source.cpp
+    src/io/tar.cpp
+    src/io/lz4_frame.cpp
+    src/protocol/odin/flash.cpp
+    src/protocol/odin/pit.cpp
+    src/app/md5_verify.cpp
+    src/app/md5_xxh3_cache.cpp
+    src/third_party/md5/md5.c
+    src/third_party/xxhash/xxhash.c
+    src/third_party/xxhash/xxhash_dispatch.c
+    src/third_party/lz4/lz4.c
+)
+target_include_directories(test_file_paths PRIVATE src)
+if (TARGET brokkr-md5-asm)
+    target_sources(test_file_paths PRIVATE $<TARGET_OBJECTS:brokkr-md5-asm>)
+endif()
+target_compile_definitions(test_file_paths PRIVATE
+    $<TARGET_PROPERTY:brokkr-platform,INTERFACE_COMPILE_DEFINITIONS>
+    $<TARGET_PROPERTY:brokkr-lib,INTERFACE_COMPILE_DEFINITIONS>
+)
+target_link_libraries(test_file_paths PRIVATE
+    brokkr-cxx-compat Threads::Threads spdlog::spdlog_header_only fmt::fmt-header-only
+)
+add_test(NAME file_paths COMMAND test_file_paths)
+
+add_executable(test_desktop_paths tests/test_desktop_paths.cpp src/app/cli_args.cpp)
+target_include_directories(test_desktop_paths PRIVATE src src-gui)
+target_link_libraries(test_desktop_paths PRIVATE brokkr-cxx-compat Qt6::Core fmt::fmt-header-only)
+if (WIN32)
+    target_link_libraries(test_desktop_paths PRIVATE shell32)
+endif()
+add_dependencies(test_desktop_paths brokkr)
+add_test(NAME desktop_paths COMMAND test_desktop_paths $<TARGET_FILE:brokkr>)
+set_tests_properties(desktop_paths PROPERTIES RESOURCE_LOCK brokkr_instance)
+set_tests_properties(md5 md5_xxh3_cache endian file_paths desktop_paths PROPERTIES TIMEOUT 120)
+
+# ── CPack ─────────────────────────────────────────────────────────────
+set(CPACK_PACKAGE_NAME "${PROJECT_NAME}")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Open-Source Implementation of Samsung Odin3")
+set(CPACK_GENERATOR "ZIP;TGZ")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "${PROJECT_NAME}")
+
+# Resource files – guarded so missing files don't break CPack
+if(EXISTS "${CMAKE_SOURCE_DIR}/LICENSE")
+  set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/assets/INSTALLER_README.txt")
+  set(CPACK_RESOURCE_FILE_README "${CMAKE_SOURCE_DIR}/assets/INSTALLER_README.txt")
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/assets/INSTALLER_WELCOME.txt")
+  set(CPACK_RESOURCE_FILE_WELCOME "${CMAKE_SOURCE_DIR}/assets/INSTALLER_WELCOME.txt")
+endif()
+
+if(WIN32)
+  list(APPEND CPACK_GENERATOR NSIS)
+  set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+
+  # Installer / uninstaller icons
+  if(EXISTS "${CMAKE_SOURCE_DIR}/assets/brokkr.ico")
+    set(CPACK_NSIS_MUI_ICON "${CMAKE_SOURCE_DIR}/assets/brokkr.ico")
+  endif()
+  if(EXISTS "${CMAKE_SOURCE_DIR}/assets/uninstall.ico")
+    set(CPACK_NSIS_MUI_UNIICON "${CMAKE_SOURCE_DIR}/assets/uninstall.ico")
+  elseif(EXISTS "${CMAKE_SOURCE_DIR}/assets/brokkr.ico")
+    set(CPACK_NSIS_MUI_UNIICON "${CMAKE_SOURCE_DIR}/assets/brokkr.ico")
+  endif()
+
+  set(CPACK_NSIS_DISPLAY_NAME "The ${PROJECT_NAME} Project")
+  set(CPACK_NSIS_WELCOME_TITLE "Welcome to The ${PROJECT_NAME} Project Installer")
+  set(CPACK_NSIS_BRANDING_TEXT "Open source Samsung Odin, in your hands")
+  set(CPACK_NSIS_MANIFEST_DPI_AWARE TRUE)
+  set(CPACK_PACKAGE_EXECUTABLES "brokkr" "Brokkr")
+  set(CPACK_NSIS_INSTALLED_ICON_NAME "bin/brokkr.exe")
+
+  # Bundle VC++ Redistributable
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|AARCH64|arm64|aarch64)$"
+         OR CMAKE_VS_PLATFORM_NAME STREQUAL "ARM64")
+        set(_vcredist_name "vc_redist.arm64.exe")
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(_vcredist_name "vc_redist.x64.exe")
+  else()
+    set(_vcredist_name "vc_redist.x86.exe")
+  endif()
+
+  if(DEFINED ENV{VCToolsRedistDir})
+    file(TO_CMAKE_PATH "$ENV{VCToolsRedistDir}" _vcredist_dir)
+    set(_vcredist_path "${_vcredist_dir}/${_vcredist_name}")
+    if(EXISTS "${_vcredist_path}")
+      message(STATUS "Found vcredist: ${_vcredist_path}")
+      install(FILES "${_vcredist_path}" DESTINATION redist)
+      set(CPACK_NSIS_EXTRA_INSTALL_COMMANDS "
+          ExecWait '\\\"$INSTDIR\\\\redist\\\\${_vcredist_name}\\\" /install /quiet /norestart'
+                    SetOutPath '$INSTDIR'
+                    RMDir /r /REBOOTOK '$INSTDIR\\redist'
+      ")
+    else()
+      message(WARNING "VCToolsRedistDir set but ${_vcredist_name} not found at: ${_vcredist_path}")
+    endif()
+  endif()
+endif()
+
+if (LINUX OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  list(APPEND CPACK_GENERATOR DEB)
+  set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Gabriel2392")
+  set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
+  set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libstdc++6")
+  set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+endif()
+
+set(CPACK_PACKAGE_FILE_NAME
+    "${PROJECT_NAME}-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}"
+)
+set(CPACK_VERBATIM_VARIABLES TRUE)
+
+include(CPack)

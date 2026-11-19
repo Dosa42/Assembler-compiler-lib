@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           sparse-checkout: sources/apk-engine-toolkit
-      - name: Build and verify static AArch64 executable
+      - name: Build and verify static AArch64 toolkit and Brokkr companions
         env:
           GITHUB_SHA: ${{ github.sha }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -35,7 +35,7 @@ jobs:
             --workdir /repo/sources/apk-engine-toolkit \
             --env GITHUB_SHA --env GITHUB_REPOSITORY --env GITHUB_RUN_ID \
             alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf \
-            sh -ec 'apk add --no-cache bash g++ make zlib-static curl ca-certificates tar file binutils python3 xz
+            sh -ec 'apk add --no-cache bash g++ make cmake pkgconf libusb-dev zlib-static curl ca-certificates tar file binutils python3 py3-jsonschema xz
           python3 ci/native_build.py'
       - name: Upload verified native archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

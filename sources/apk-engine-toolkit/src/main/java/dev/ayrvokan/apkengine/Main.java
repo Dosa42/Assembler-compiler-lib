@@ -10,12 +10,12 @@ import java.security.MessageDigest;
 import java.util.*;
 
 public final class Main {
-    public static final String VERSION = "0.2.0";
+    public static final String VERSION = "0.3.0";
     static final PrintWriter OUT = new PrintWriter(System.out, true, StandardCharsets.UTF_8);
     static final Map<String, Tool> TOOLS = new LinkedHashMap<>();
     interface Handler { JsonObject run(JsonObject args) throws Exception; }
     interface FileWriter { void write(Path path) throws Exception; }
-    record Tool(String name, String engine, String description, JsonObject schema, boolean writes, Handler handler) {}
+    record Tool(String name, String engine, String description, JsonObject schema, boolean writes, boolean destructive, boolean openWorld, JsonObject outputSchema, Handler handler) {}
 
     static {
         ArchiveTools.register();
@@ -23,6 +23,7 @@ public final class Main {
         XmlTools.register();
         SigningTools.register();
         AndroidInspectionTools.register();
+        BrokkrTools.register();
     }
 
     public static JsonObject obj(Object... pairs) {
@@ -55,16 +56,24 @@ public final class Main {
     }
 
     static void tool(String name, String engine, String description, boolean writes, String[] required, JsonObject properties, Handler handler) {
+        tool(name, engine, description, writes, writes, false, null, required, properties, handler);
+    }
+
+    static void tool(String name, String engine, String description, boolean writes, boolean destructive, boolean openWorld, JsonObject outputSchema, String[] required, JsonObject properties, Handler handler) {
         JsonArray req = new JsonArray();
         for (String key : required) req.add(key);
         TOOLS.put(name, new Tool(name, engine, description,
-                obj("type", "object", "properties", properties, "required", req, "additionalProperties", false), writes, handler));
+                obj("type", "object", "properties", properties, "required", req, "additionalProperties", false), writes, destructive, openWorld, outputSchema, handler));
     }
 
     static JsonArray toolList() {
         JsonArray list = new JsonArray();
-        for (Tool t : TOOLS.values()) list.add(obj("name", t.name(), "description", t.description(), "inputSchema", t.schema(),
-                "annotations", obj("readOnlyHint", !t.writes(), "destructiveHint", t.writes(), "openWorldHint", false)));
+        for (Tool t : TOOLS.values()) {
+            JsonObject descriptor = obj("name", t.name(), "description", t.description(), "inputSchema", t.schema(),
+                    "annotations", obj("readOnlyHint", !t.writes(), "destructiveHint", t.destructive(), "openWorldHint", t.openWorld()));
+            if (t.outputSchema() != null) descriptor.add("outputSchema", t.outputSchema());
+            list.add(descriptor);
+        }
         return list;
     }
 
@@ -172,7 +181,12 @@ public final class Main {
     }
 
     static JsonObject error(Exception e) {
-        return obj("type", e.getClass().getSimpleName(), "message", e.getMessage() == null ? e.toString() : e.getMessage());
+        JsonObject error = obj("type", e.getClass().getSimpleName(), "message", e.getMessage() == null ? e.toString() : e.getMessage());
+        if (e instanceof BrokkrTools.NativeFailure nativeFailure) {
+            error.add("native_result", nativeFailure.result);
+            error.addProperty("exit_code", nativeFailure.exitCode);
+        }
+        return error;
     }
 
     static JsonObject parseObject(String text) {

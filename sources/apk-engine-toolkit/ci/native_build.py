@@ -10,9 +10,42 @@ import tempfile
 import time
 import urllib.request
 
+import build_brokkr
+
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "evidence"
 COMMANDS = []
+ARTIFACT_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["name", "bytes", "sha256"],
+    "properties": {"name": {"type": "string", "minLength": 1}, "bytes": {"type": "integer", "minimum": 1},
+                   "sha256": build_brokkr.IDENTITY_SCHEMA["properties"]["sha256"]},
+}
+NATIVE_BUILD_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": False,
+    "required": ["schema", "status", "actual_target", "publisher_platform", "android_device_validation", "source_commit",
+                 "repository", "workflow_run_id", "lock_sha256", "toolchain", "commands"],
+    "properties": {
+        "schema": {"const": "apk-engine.native-build/1"}, "status": {"enum": ["running", "passed", "failed"]},
+        "actual_target": {"type": "string"}, "publisher_platform": {"type": "string"},
+        "android_device_validation": {"const": "pending"},
+        **{key: {"type": ["string", "null"]} for key in ["source_commit", "repository", "workflow_run_id"]},
+        "lock_sha256": build_brokkr.IDENTITY_SCHEMA["properties"]["sha256"], "toolchain": {"type": "object"},
+        "commands": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["command", "exit_code", "seconds", "log"],
+            "properties": {"command": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                           "exit_code": {"type": "integer"}, "seconds": {"type": "number", "minimum": 0},
+                           "log": {"type": "string", "minLength": 1}},
+        }},
+        "companion_build": build_brokkr.BUILD_SCHEMA, "native_binary": ARTIFACT_SCHEMA, "archive": ARTIFACT_SCHEMA,
+        **{key: {"const": "passed"} for key in ["jvm_trace_validation", "native_integration_validation", "static_elf_validation"]},
+        "error": {"type": "string"},
+    },
+    "allOf": [
+        {"if": {"properties": {"status": {"const": "passed"}}},
+         "then": {"required": ["companion_build", "native_binary", "jvm_trace_validation", "native_integration_validation", "static_elf_validation"]}},
+        {"if": {"properties": {"status": {"const": "failed"}}}, "then": {"required": ["error"]}},
+    ],
+}
 
 
 def run(command, log_name, env):
@@ -51,7 +84,7 @@ def install_toolchain(lock, env):
     return destination
 
 
-def package(lock, binary, toolchain_root):
+def package(lock, binary, toolchain_root, companions):
     name = lock["artifact"]["name"]
     output = ROOT / "dist" / (name + ".tar.xz")
     with tempfile.TemporaryDirectory(prefix="apk-engine-package-") as directory:
@@ -59,9 +92,24 @@ def package(lock, binary, toolchain_root):
         (base / "bin").mkdir(parents=True)
         shutil.copy2(binary, base / "bin/apk-engine")
         (base / "bin/apk-engine").chmod(0o755)
+        for name, record in companions["binaries"].items():
+            original = ROOT / record["path"]
+            if build_brokkr.identity(original, ROOT) != record:
+                raise ValueError("Companion changed after validation: " + name)
+            shutil.copy2(original, base / "bin" / name)
+            (base / "bin" / name).chmod(0o755)
+        static_library = ROOT / companions["static_library"]["path"]
+        if build_brokkr.identity(static_library, ROOT) != companions["static_library"]:
+            raise ValueError("Brokkr static API library changed after build")
+        (base / "lib").mkdir()
+        shutil.copy2(static_library, base / "lib/libbrokkr-engine.a")
+        shutil.copytree(build_brokkr.VENDOR / "include", base / "include")
         information = base / "share/build-info"
         information.mkdir(parents=True)
-        names = ["native-build.json", "dependency-preparation.json", "integration-jvm.json", "integration-native.json", "elf.json", "native-image.log", "toolchain-version.log", "readelf.log", "file.log", "system-packages.log"]
+        names = ["native-build.json", "native-build.schema.json", "brokkr-build.json", "brokkr-build.schema.json",
+                 "brokkr-build.log", "brokkr-usb-build.log", "brokkr-usb-metadata.log", "brokkr-engine-readelf.log", "brokkr-usb-broker-readelf.log",
+                 "dependency-preparation.json", "integration-jvm.json", "integration-native.json", "elf.json",
+                 "native-image.log", "toolchain-version.log", "readelf.log", "file.log", "system-packages.log"]
         for name in names:
             shutil.copy2(EVIDENCE / name, information / name)
         shutil.copy2(ROOT / "dist/build.json", information / "java-build.json")
@@ -72,16 +120,22 @@ def package(lock, binary, toolchain_root):
         shutil.copy2(ROOT / "ci/vendor-src/axml/LICENSE", licenses / "axml-GPL-3.0.txt")
         shutil.copy2(ROOT / "ci/vendor-src/zipalign-java/MIT.txt", licenses / "zipalign-java-MIT.txt")
         shutil.copy2(ROOT / "ci/vendor-src/zipalign-java/THIRD-PARTY-NOTICES.txt", licenses / "zipalign-java-THIRD-PARTY-NOTICES.txt")
+        shutil.copytree(build_brokkr.VENDOR / "licenses", licenses / "brokkr")
+        shutil.copy2(build_brokkr.VENDOR / "usb/LICENSE", licenses / "brokkr/USB-broker-MIT.txt")
+        for component in ["lz4", "xxhash"]:
+            shutil.copy2(build_brokkr.VENDOR / "upstream/original/src/third_party" / component / "LICENSE",
+                         licenses / "brokkr" / (component + "-BSD-2-Clause.txt"))
         if (toolchain_root / "legal").is_dir():
             shutil.copytree(toolchain_root / "legal", licenses / "liberica-nik", symlinks=False)
         source = base / "share/source"
         source.mkdir(parents=True)
-        for relative in ["src", "tests", "build.py", "README.md", "LICENSE", "native-dependencies.json", "ci/prepare.py", "ci/check_elf.py", "ci/native_build.py", "ci/vendor-src", "ci/licenses"]:
+        build_brokkr.verify_sources(build_brokkr.VENDOR)
+        for relative in ["src", "tests", "build.py", "README.md", "LICENSE", "native-dependencies.json", "ci/prepare.py", "ci/check_elf.py", "ci/native_build.py", "ci/build_brokkr.py", "ci/vendor-src", "ci/licenses", ".github/workflows/native-arm64.yml"]:
             original = ROOT / relative
             target = source / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             if original.is_dir():
-                shutil.copytree(original, target)
+                shutil.copytree(original, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
             else:
                 shutil.copy2(original, target)
         with tarfile.open(output, "w:xz", preset=6) as archive:
@@ -111,6 +165,7 @@ def main():
     try:
         if platform.machine() not in {"aarch64", "arm64"}:
             raise RuntimeError("Native build requires an ARM64 host")
+        build_brokkr.verify_sources(build_brokkr.VENDOR)
         env = dict(os.environ)
         for name in ["JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH"]:
             env.pop(name, None)
@@ -119,6 +174,9 @@ def main():
         run(["apk", "info", "-v"], "system-packages.log", env)
         library = ROOT / ".ci-library"
         run(["python3", "ci/prepare.py", "--library", library, "--evidence", EVIDENCE / "dependency-preparation.json"], "preparation.log", env)
+        report["companion_build"] = build_brokkr.build(library, EVIDENCE, env, run)
+        env["APK_ENGINE_BROKKR"] = str(ROOT / report["companion_build"]["binaries"]["brokkr-engine"]["path"])
+        env["APK_ENGINE_BROKKR_USB_BROKER"] = str(ROOT / report["companion_build"]["binaries"]["brokkr-usb-broker"]["path"])
         run(["python3", "build.py", "--library", library], "java-build.log", env)
         configuration = ROOT / "ci/generated-config"
         configuration.mkdir(parents=True)
@@ -132,13 +190,13 @@ def main():
         run(["readelf", "-h", "-l", "-d", binary], "readelf.log", env)
         run(["file", binary], "file.log", env)
         report.update({"status": "passed", "native_binary": {"name": binary.name, "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "bytes": binary.stat().st_size}, "jvm_trace_validation": "passed", "native_integration_validation": "passed", "static_elf_validation": "passed"})
-        target.write_text(json.dumps(report, indent=2) + "\n")
-        report["archive"] = package(lock, binary, toolchain_root)
-        target.write_text(json.dumps(report, indent=2) + "\n")
+        build_brokkr.write_record(target, report, NATIVE_BUILD_SCHEMA)
+        report["archive"] = package(lock, binary, toolchain_root, report["companion_build"])
+        build_brokkr.write_record(target, report, NATIVE_BUILD_SCHEMA)
         print(json.dumps(report["archive"]))
     except Exception as error:
         report.update({"status": "failed", "error": type(error).__name__ + ": " + str(error)})
-        target.write_text(json.dumps(report, indent=2) + "\n")
+        build_brokkr.write_record(target, report, NATIVE_BUILD_SCHEMA)
         raise
 
 

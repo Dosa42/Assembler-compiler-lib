@@ -1,0 +1,46 @@
+{
+  "schema": "brokkr.dependencies/1",
+  "producer": "source-acquisition",
+  "libusb_termux_recipe_commit": "e9bc27863acc1496f540fbe6fb037ccf93afd310",
+  "libcxx_termux_recipe_commit": "c3326ca2d01cbc89bd3d48fd26f407b9fed1c69c",
+  "binary_origin": "Installed Termux packages libusb 1.0.30 and libc++ 30 (Android NDK r30); copied and RPATH changed only. Source rebuild not performed.",
+  "libcxx_notice_scope": "LLVM libc++ and libc++abi release 21.1.8 notices retained as supplemental upstream notices; installed package copyright also retained. NDK archive and toolchain excluded.",
+  "files": [
+    {
+      "path": "termux-libusb/build.sh",
+      "url": "https://raw.githubusercontent.com/termux/termux-packages/e9bc27863acc1496f540fbe6fb037ccf93afd310/packages/libusb/build.sh",
+      "sha256": "2777a57332d418e68fa8ebe050b5688c0771cc8305be0a2f21ee0ee7f4a7a05b",
+      "bytes": 893
+    },
+    {
+      "path": "termux-libusb/termux-usb-support.patch",
+      "url": "https://raw.githubusercontent.com/termux/termux-packages/e9bc27863acc1496f540fbe6fb037ccf93afd310/packages/libusb/termux-usb-support.patch",
+      "sha256": "da923c4744e988fcfeab58c5cf51496a7eeadd8b0570425ed0b3a79b453d2369",
+      "bytes": 4185
+    },
+    {
+      "path": "libusb-1.0.30.tar.bz2",
+      "url": "https://github.com/libusb/libusb/releases/download/v1.0.30/libusb-1.0.30.tar.bz2",
+      "sha256": "fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf",
+      "bytes": 656112
+    },
+    {
+      "path": "termux-libcxx-build.sh",
+      "url": "https://raw.githubusercontent.com/termux/termux-packages/c3326ca2d01cbc89bd3d48fd26f407b9fed1c69c/packages/libc%2B%2B/build.sh",
+      "sha256": "f0e670ec0f30469e91920a42427115e4bee082c8a22a6dc72e983603dfe659cf",
+      "bytes": 1209
+    },
+    {
+      "path": "../../licenses/libcxx-LICENSE.TXT",
+      "url": "https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-21.1.8/libcxx/LICENSE.TXT",
+      "sha256": "539dd7aed86e8a4f12cbdd0e6c50c189c7d74847e4fecc64ce2c6ee3a01da38b",
+      "bytes": 16703
+    },
+    {
+      "path": "../../licenses/libcxxabi-LICENSE.TXT",
+      "url": "https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-21.1.8/libcxxabi/LICENSE.TXT",
+      "sha256": "e2b35be49f7284a45b7baca8fc7b3ab7440e7902392b2528a457816b5bb2a15c",
+      "bytes": 16706
+    }
+  ]
+}

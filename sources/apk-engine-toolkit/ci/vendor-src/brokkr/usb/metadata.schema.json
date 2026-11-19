@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:brokkr:usb-broker:1",
+  "type": "object",
+  "properties": {
+    "schema": {"const": "brokkr.usb-broker/1"},
+    "state": {"enum": ["open", "closed", "unavailable"]},
+    "socket": {"type": "string", "pattern": "^/", "maxLength": 107},
+    "pid": {"type": "integer", "minimum": 1},
+    "uid": {"type": "integer", "minimum": 0},
+    "session": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "device_path": {"type": "string"},
+    "identity": {
+      "type": "object",
+      "properties": {
+        "dev": {"type": "integer", "minimum": 0},
+        "ino": {"type": "integer", "minimum": 0},
+        "rdev": {"type": "integer", "minimum": 0},
+        "mode": {"type": "integer", "minimum": 0}
+      },
+      "required": ["dev", "ino", "rdev", "mode"],
+      "additionalProperties": false
+    },
+    "vendor_id": {"type": ["integer", "null"], "minimum": 0, "maximum": 65535},
+    "product_id": {"type": ["integer", "null"], "minimum": 0, "maximum": 65535},
+    "opened_at": {"type": "integer", "minimum": 0},
+    "observed_at": {"type": "integer", "minimum": 0},
+    "error": {"type": "string", "minLength": 1},
+    "error_errno": {"type": "integer", "minimum": 1}
+  },
+  "required": ["schema", "state", "socket"],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {"properties": {"state": {"const": "unavailable"}}},
+      "then": {"required": ["error", "error_errno"]},
+      "else": {"required": ["pid", "uid", "session", "device_path", "identity", "vendor_id", "product_id", "opened_at", "observed_at"]}
+    }
+  ]
+}
