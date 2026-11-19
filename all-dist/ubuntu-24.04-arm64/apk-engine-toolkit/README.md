@@ -2,13 +2,13 @@
 
 The installation archive contains this component's source-built executables, libraries and build provenance.
 
-[Original build run](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/44119139955)
+[Original build run](https://github.com/Dosa42/Assembler-compiler-lib/actions/runs/44457163910)
 
-Source repository commit: 244623d2f4d26526213e046da8cc0caddf0fcfac.
+Source repository commit: 5d3da36037adcda6cfe2caa9450f1d28cc6a2f55.
 
 ## Files
 
-- [apk-engine-toolkit-ubuntu-24.04-arm64.tar.xz](apk-engine-toolkit-ubuntu-24.04-arm64.tar.xz) (7950072 bytes)
+- [apk-engine-toolkit-ubuntu-24.04-arm64.tar.xz](apk-engine-toolkit-ubuntu-24.04-arm64.tar.xz) (9993692 bytes)
 
 Download the files above, SHA256SUMS and apk-engine-toolkit-ubuntu-24.04-arm64.tar.xz.sha256 into one directory.
 
